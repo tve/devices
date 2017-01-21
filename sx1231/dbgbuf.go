@@ -3,7 +3,7 @@
 // This file implements a debug buffer into which events can be pushed and then later printed from
 // for debugging purposes.
 
-package rfm69
+package sx1231
 
 import (
 	"fmt"

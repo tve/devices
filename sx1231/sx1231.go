@@ -1,8 +1,8 @@
 // Copyright 2016 by Thorsten von Eicken, see LICENSE file
 
-// The RFM69 package interfaces with a HopeRF RFM69 radio connected to an SPI bus.
+// The SX1231 package interfaces with a HopeRF RFM69 radio connected to an SPI bus.
 //
-// In reality, the rfm69 modules uses a Semtech SX1231 or SX1231H radio chip and this
+// The RFM69 modules use a Semtech SX1231 or SX1231H radio chip and this
 // package should work fine with other radio modules using the same chip. The only real
 // difference will be the power output section where different modules use different output stage
 // configurations.
@@ -18,14 +18,14 @@
 // function. The object will be unusable for further operation and the client code will have to
 // create and initialize a fresh object which will re-establish communication with the radio chip.
 //
-// This driver does not do a number of things that other rfm69 drivers tend to do with the
+// This driver does not do a number of things that other sx1231 drivers tend to do with the
 // goal of leaving these tasks to higher-level drivers. This driver does not use the address
 // filtering capability: it recevies all packets because that's simpler and the few extra interrupts
 // should not matter to a system that can run Golang. It also accepts packets that have a CRC error
 // and simply flags the error. It does not constrain the sync bytes, the frequency, or the data
 // rates.
 //
-// The main limitations of this driver are that it operates the rfm69 in FSK variable-length packet
+// The main limitations of this driver are that it operates the sx1231 in FSK variable-length packet
 // mode and limits the packet size to the 66 bytes that fit into the FIFO, meaning that the payloads
 // pushed into the TX channel must be 65 bytes or less, leaving one byte for the required packet
 // length.
@@ -33,7 +33,7 @@
 // The methods on the Radio object are not concurrency safe. Since they all deal with configuration
 // this should not pose difficulties. The Error function may be called from multiple goroutines
 // and obviously the TX and RX channels work well with concurrency.
-package rfm69
+package sx1231
 
 import (
 	"errors"
@@ -48,7 +48,7 @@ import (
 const rxChanCap = 4 // queue up to 4 received packets before dropping
 const txChanCap = 4 // queue up to 4 packets to tx before blocking
 
-// Radio represents a HopeRF RFM69 radio.
+// Radio represents a Semtech SX1231 radio as used in HopeRF's RFM69 modules.
 type Radio struct {
 	TxChan chan<- []byte    // channel to transmit packets
 	RxChan <-chan *RxPacket // channel for received packets
@@ -76,7 +76,7 @@ type RadioOpts struct {
 	Logger LogPrintf // function to use for logging
 }
 
-// Rate describes the RFM69 configuration to achieve a specific bit rate.
+// Rate describes the SX1231 configuration to achieve a specific bit rate.
 type Rate struct {
 	Fdev    int  // TX frequency deviation in Hz
 	Shaping byte // 0:none, 1:gaussian BT=1, 2:gaussian BT=0.5, 3:gaussian BT=0.3
@@ -105,7 +105,7 @@ type RxPacket struct {
 	Fei     int    // frequency error for current packet
 }
 
-// New initializes an rfm69 Radio given an spi.Conn and an interrupt pin, and places the radio
+// New initializes an sx1231 Radio given an spi.Conn and an interrupt pin, and places the radio
 // in receive mode.
 //
 // The SPI bus must be set to 10Mhz max and mode 0.
@@ -122,7 +122,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
 		spi: dev, intrPin: intr,
 		mode: 255,
-		err:  fmt.Errorf("rfm69 is not initialized"),
+		err:  fmt.Errorf("sx1231 is not initialized"),
 		log:  func(format string, v ...interface{}) {},
 	}
 	if opts.Logger != nil {
@@ -130,16 +130,20 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	}
 
 	// Set SPI parameters.
-	dev.Speed(1 * 1000 * 1000) // 4Mhz
-	dev.Configure(spi.Mode0, 8)
+	if err := dev.Speed(4 * 1000 * 1000); err != nil {
+		return nil, fmt.Errorf("sx1231: cannot set speed, %v", err)
+	}
+	if err := dev.Configure(spi.Mode0, 8); err != nil {
+		return nil, fmt.Errorf("sx1231: cannot set mode, %v", err)
+	}
 
-	// Try to synchronize communication with the rfm69.
+	// Try to synchronize communication with the sx1231.
 	sync := func(pattern byte) error {
 		for n := 10; n > 0; n-- {
 			// Doing write transactions explicitly to get OS errors.
 			r.writeReg(REG_SYNCVALUE1, pattern)
 			if err := dev.Tx([]byte{REG_SYNCVALUE1 | 0x80, pattern}, []byte{0, 0}); err != nil {
-				return fmt.Errorf("rfm69: %s", err)
+				return fmt.Errorf("sx1231: %s", err)
 			}
 			// Read same thing back, we hope...
 			v := r.readReg(REG_SYNCVALUE1)
@@ -147,7 +151,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 				return nil
 			}
 		}
-		return errors.New("rfm69: cannot sync with chip")
+		return errors.New("sx1231: cannot sync with chip")
 	}
 	if err := sync(0xaa); err != nil {
 		return nil, err
@@ -163,7 +167,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	//embd.DigitalWrite("CSID1", 0)
 
 	// Detect chip version.
-	r.log("RFM69/SX1231 version %#x", r.readReg(REG_VERSION))
+	r.log("SX1231/SX1231 version %#x", r.readReg(REG_VERSION))
 
 	// Write the configuration into the registers.
 	for i := 0; i < len(configRegs)-1; i += 2 {
@@ -176,7 +180,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 
 	// Configure the sync bytes.
 	if len(opts.Sync) < 1 || len(opts.Sync) > 8 {
-		return nil, fmt.Errorf("rfm69: invalid number of sync bytes: %d, must be 1..8",
+		return nil, fmt.Errorf("sx1231: invalid number of sync bytes: %d, must be 1..8",
 			len(r.sync))
 	}
 	r.sync = opts.Sync
@@ -195,8 +199,8 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r.TxChan = r.txChan
 
 	// Initialize interrupt pin.
-	if err := r.intrPin.In(gpio.Float, gpio.Rising); err != nil {
-		return nil, fmt.Errorf("rfm69: error initializing interrupt pin: %s", err)
+	if err := r.intrPin.In(gpio.Float, gpio.RisingEdge); err != nil {
+		return nil, fmt.Errorf("sx1231: error initializing interrupt pin: %s", err)
 	}
 
 	// Test the interrupt function by configuring the radio such that it generates an interrupt
@@ -209,7 +213,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r.setMode(MODE_FS)
 	r.writeReg(REG_DIOMAPPING1, DIO_MAPPING+0xC0)
 	if !r.intrPin.WaitForEdge(time.Second) {
-		return nil, fmt.Errorf("rfm69: interrupts from radio do not work, try unexporting gpio%d", r.intrPin.Number())
+		return nil, fmt.Errorf("sx1231: interrupts from radio do not work, try unexporting gpio%d", r.intrPin.Number())
 	}
 	r.writeReg(REG_DIOMAPPING1, DIO_MAPPING)
 	for r.intrPin.WaitForEdge(0) {
@@ -340,7 +344,7 @@ func (r *Radio) setMode(mode byte) {
 			return
 		}
 	}
-	r.err = errors.New("rfm69: timeout switching modes")
+	r.err = errors.New("sx1231: timeout switching modes")
 }
 
 // receiving checks whether a reception is currently in progress. It uses the sync match flag as
@@ -378,7 +382,7 @@ func (r *Radio) worker() {
 			} else {
 				select {
 				case <-intrStop:
-					r.log("rfm69: rx interrupt goroutine exiting")
+					r.log("sx1231: rx interrupt goroutine exiting")
 					return
 				default:
 				}
@@ -413,11 +417,11 @@ func (r *Radio) worker() {
 			}
 		}
 	}
-	r.log("rfm69: rx goroutine exiting, %s", r.err)
+	r.log("sx1231: rx goroutine exiting, %s", r.err)
 	// Signal to clients that something is amiss.
 	close(r.rxChan)
 	close(intrStop)
-	r.intrPin.In(gpio.Float, gpio.None) // causes interrupt goroutine to exit
+	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
 	r.spi.Close()
 }
 
@@ -543,10 +547,13 @@ func (r *Radio) intrReceive() {
 
 	// Push packet into channel.
 	l := rBuf[1]
-	if l > 66 {
-		l = 66 // or error?
+	switch {
+	case l > 65:
+		l = 65 // or error?
+	case l < 1:
+		l = 1 // or error
 	}
-	pkt := RxPacket{Payload: rBuf[2 : 1+l], CrcOK: crcOK, Rssi: rssi, Fei: fei}
+	pkt := RxPacket{Payload: rBuf[2 : 2+l], CrcOK: crcOK, Rssi: rssi, Fei: fei}
 	select {
 	case r.rxChan <- &pkt:
 	default:
@@ -570,7 +577,7 @@ func (r *Radio) logRegs() {
 	}
 }
 
-// writeReg writes one or multiple registers starting at addr, the rfm69 auto-increments (except
+// writeReg writes one or multiple registers starting at addr, the sx1231 auto-increments (except
 // for the FIFO register where that wouldn't be desirable).
 func (r *Radio) writeReg(addr byte, data ...byte) {
 	wBuf := make([]byte, len(data)+1)

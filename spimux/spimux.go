@@ -55,3 +55,6 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 	return c.Conn.Write(b)
 }
+
+// Close is a no-op. TODO: close once both spimux are closed.
+func (c *Conn) Close() error { return nil }
