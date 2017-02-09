@@ -1,6 +1,6 @@
 // Copyright 2016 by Thorsten von Eicken, see LICENSE file
 
-package rfm69
+package sx1231
 
 const (
 	REG_FIFO        = 0x00

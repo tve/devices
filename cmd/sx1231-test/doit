@@ -1,2 +1,2 @@
 #! /usr/bin/fish
-env GOARCH=arm go build .; and rsync rfm69-test chip2:; and ssh chip2 "bash -c 'echo 35 | sudo tee /sys/class/gpio/unexport; sudo ./rfm69-test'"
+env GOARCH=arm go build .; and rsync sx1231-test chip4:; and ssh chip4 "bash -c 'sudo ./sx1231-test'"

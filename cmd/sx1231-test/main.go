@@ -11,7 +11,7 @@ import (
 	"github.com/google/periph/conn/gpio"
 	"github.com/google/periph/conn/spi"
 	"github.com/google/periph/host"
-	"github.com/tve/devices/rfm69"
+	rfm69 "github.com/tve/devices/sx1231"
 )
 
 func panicIf(err error) {
@@ -23,8 +23,7 @@ func panicIf(err error) {
 func main() {
 	_, err := host.Init()
 	panicIf(err)
-	intrPinName := "EINT17"
-	//intrPinName := "1023"
+	intrPinName := "XIO-P0"
 	intrPin := gpio.ByName(intrPinName)
 	if intrPin == nil {
 		panic("Cannot open pin " + intrPinName)
