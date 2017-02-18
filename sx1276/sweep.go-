@@ -1,0 +1,322 @@
+// Copyright 2016 by Thorsten von Eicken, see LICENSE file
+
+package sx1276
+
+import (
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/periph/conn/spi"
+)
+
+// Sweeper is a radio in a mode where is can sweep the frequency spectrum using OOK mode.
+type Sweeper struct {
+	// configuration
+	spi     spi.ConnCloser // SPI device to access the radio
+	ctrFreq uint32         // center frequency in Hz
+	freq    uint32         // current frequency
+	mode    byte           // current mode
+	// state
+	stopChan chan struct{}
+	err      error     // persistent error
+	log      LogPrintf // function to use for logging
+}
+
+// NewSweeper
+func NewSweeper(dev spi.ConnCloser, freq uint32, log LogPrintf) (*Sweeper, error) {
+	s := &Sweeper{
+		spi: dev,
+		err: fmt.Errorf("sx1276 is not initialized"),
+		log: func(format string, v ...interface{}) {},
+	}
+	if log != nil {
+		s.log = log
+	}
+
+	// Set SPI parameters.
+	if err := dev.Speed(4 * 1000 * 1000); err != nil {
+		return nil, fmt.Errorf("sx1276: cannot set speed, %v", err)
+	}
+	if err := dev.Configure(spi.Mode0, 8); err != nil {
+		return nil, fmt.Errorf("sx1276: cannot set mode, %v", err)
+	}
+
+	// Try to synchronize communication with the sx1276.
+	sync := func(pattern byte) error {
+		for n := 10; n > 0; n-- {
+			// Doing write transactions explicitly to get OS errors.
+			s.writeReg(REG_SYNC, pattern)
+			if err := dev.Tx([]byte{REG_SYNC | 0x80, pattern}, []byte{0, 0}); err != nil {
+				return fmt.Errorf("sx1276: %s", err)
+			}
+			// Read same thing back, we hope...
+			v := s.readReg(REG_SYNC)
+			if v == pattern {
+				return nil
+			}
+		}
+		return errors.New("sx1276: cannot sync with chip")
+	}
+	if err := sync(0xaa); err != nil {
+		return nil, err
+	}
+	if err := sync(0x55); err != nil {
+		return nil, err
+	}
+
+	s.setMode(MODE_SLEEP)
+
+	// Detect chip version.
+	s.log("SX1276 version %#x", s.readReg(REG_VERSION))
+
+	// Write the configuration into the registers.
+	for i := 0; i < len(sweepRegs)-1; i += 2 {
+		s.writeReg(sweepRegs[i], sweepRegs[i+1])
+	}
+
+	// Configure the transmission parameters.
+	s.SetFrequency(freq)
+	s.SetPower(17)
+
+	// log register contents
+	s.LogRegs()
+
+	s.err = nil
+
+	return s, nil
+}
+
+// SetFrequency changes the center frequency at which the radio transmits and receives. The
+// frequency can be specified at any scale (hz, khz, mhz). The frequency value is not checked
+// and invalid values will simply cause the radio not to work particularly well.
+func (s *Sweeper) SetFrequency(freq uint32) {
+	// accept any frequency scale as input, including KHz and MHz
+	// multiply by 10 until freq >= 100 MHz
+	for freq > 0 && freq < 100000000 {
+		freq = freq * 10
+	}
+
+	if s.freq == freq {
+		return
+	}
+	// Frequency steps are in units of (32,000,000 >> 19) = 61.03515625 Hz
+	// use multiples of 64 to avoid multi-precision arithmetic, i.e. 3906.25 Hz
+	// due to this, the lower 6 bits of the calculated factor will always be 0
+	// this is still 4 ppm, i.e. below the radio's 32 MHz crystal accuracy
+	// 868.0 MHz = 0xD90000, 868.3 MHz = 0xD91300, 915.0 MHz = 0xE4C000
+	frf := (freq << 2) / (32000000 >> 11)
+	s.log("SetFreq: %d %d %02x %02x %02x", freq, uint32(frf<<6),
+		byte(frf>>10), byte(frf>>2), byte(frf<<6))
+	s.writeReg(REG_FRFMSB, byte(frf>>10), byte(frf>>2), byte(frf<<6))
+	s.freq = freq
+}
+
+// GetRssi reads the raw RSSI and returns it.
+func (s *Sweeper) GetRssi() int {
+	s.log("IRQ: %#x %#x", s.readReg(0x3e), s.readReg(0x3f))
+	return -int(s.readReg(0x11)) / 2
+}
+
+// StartRx starts the receiver, but the way it's configured it's not gonna receive anything.
+func (s *Sweeper) StartRx() {
+	s.setMode(5)
+}
+
+// SetPower configures the radio for the specified output power. It only supports the high-power
+// amp because RFM9x modules don't have the lower-power amps connected to anything.
+//
+// The datasheet is confusing about how PaConfig gets set and the formula for OutputPower
+// looks incorrect. Fortunately Semtech provides reference code...
+func (s *Sweeper) SetPower(dBm byte) {
+	switch {
+	case dBm < 2:
+		dBm = 2
+	case dBm > 20:
+		dBm = 20
+	}
+	s.log("SetPower %ddBm", dBm)
+	s.setMode(MODE_STANDBY)
+	if dBm > 17 {
+		s.writeReg(REG_PADAC, 0x07) // turn 20dBm mode on, this offsets the PACONFIG by 3
+		s.writeReg(REG_PACONFIG, 0xf0+dBm-5)
+	} else {
+		s.writeReg(REG_PACONFIG, 0xf0+dBm-2)
+		s.writeReg(REG_PADAC, 0x04)
+	}
+}
+
+// TxPacket sends one packet for the purpose of checking the RSSI.
+func (s *Sweeper) TxPacket() {
+	s.setMode(2) // TX FS mode
+	// send a 10 byte packet
+	var b [10]byte
+	for i := range b {
+		b[i] = 0x5A
+	}
+	s.writeReg(0, b[:]...)
+	s.setMode(3) // TX mode
+}
+
+// RxPacket waits for the reception of a packet and returns the freq and rssi.
+func (s *Sweeper) RxPacket() (int, int) {
+	if s.mode != 5 {
+		s.setMode(5) // RX mode
+	}
+	defer func() {
+		//s.writeReg(0x0d, 0x40|s.readReg(0x0d)) // restart RX
+		s.setMode(1)
+		time.Sleep(time.Millisecond)
+		s.setMode(5)
+	}()
+
+	ok := s.PollIRQ(0x3e, 0x01, 200*time.Millisecond)
+
+	rssi := -int(s.readReg(0x11)) / 2
+	fei16 := int16(s.readReg(0x1d)) << 8
+	fei16 = fei16 | int16(s.readReg(0x1e))
+	fei := int(fei16) * 123 / 2
+
+	ok = ok && s.PollIRQ(0x3f, 0x04, 200*time.Millisecond)
+
+	if !ok {
+		s.log("IRQ: %#x %#x, Mode: %#x, FEI: %d, RSSI: %d, timeout",
+			s.readReg(0x3e), s.readReg(0x3f), s.readReg(1), fei, rssi)
+		return 0, -100
+	}
+
+	var wBuf, rBuf [11]byte
+	wBuf[0] = REG_FIFO
+	s.spi.Tx(wBuf[:], rBuf[:])
+	s.log("IRQ: %#x %#x, Mode: %#x, FEI: %d, RSSI: %d, BUF: %+v", s.readReg(0x3e), s.readReg(0x3f),
+		s.readReg(1), fei, rssi, rBuf)
+	return fei, rssi
+}
+
+func (s *Sweeper) PollIRQ(addr, mask byte, timeout time.Duration) bool {
+	to := time.After(timeout)
+	for s.readReg(addr)&mask == 0 {
+		select {
+		case <-to:
+			return false
+		default:
+		}
+	}
+	return true
+}
+
+// StartTx starts transmitting at the current frequency.
+func (s *Sweeper) StartTx() {
+	s.setMode(3) // TX mode
+	s.stopChan = make(chan struct{}, 1)
+	go func() {
+		var b [32]byte
+		for i := range b {
+			b[i] = 0xAA
+		}
+		for {
+			s.log("IRQ: %#x %#x", s.readReg(0x3e), s.readReg(0x3f))
+			if s.readReg(0x3f)&0x20 == 0 {
+				s.writeReg(0, b[:]...)
+			}
+			time.Sleep(5 * time.Second)
+			select {
+			case <-s.stopChan:
+				return
+			default:
+			}
+		}
+	}()
+}
+
+// StopTx stops transmitting.
+func (s *Sweeper) StopTx() {
+	close(s.stopChan)
+	s.setMode(0) // sleep
+}
+
+// SetLogger sets a logging function, nil may be used to disable logging, which is the default.
+func (s *Sweeper) SetLogger(l LogPrintf) {
+	if l != nil {
+		s.log = l
+	} else {
+		s.log = func(format string, v ...interface{}) {}
+	}
+}
+
+// Error returns any persistent error that may have been encountered.
+func (s *Sweeper) Error() error { return s.err }
+
+//
+
+func (s *Sweeper) setMode(mode byte) {
+	//if s.mode == mode && mode != 0 {
+	//	return
+	//}
+	lf := byte(0x08)
+	if s.ctrFreq > 600000000 {
+		lf = 0
+	}
+	s.writeReg(REG_OPMODE, mode&7|lf) // FSK mode
+	if mode == 5 {
+		t0 := time.Now()
+		for s.readReg(0x3e)&0x80 == 0 {
+			if time.Now().Sub(t0) > time.Second {
+				s.log("Waiting for mode %#x: %#x", s.readReg(1), s.readReg(0x3e))
+				s.writeReg(REG_OPMODE, 0|lf) // standby
+				time.Sleep(time.Millisecond)
+				s.writeReg(REG_OPMODE, mode&7|lf) // FSK mode
+				return
+			}
+			time.Sleep(10 * time.Microsecond)
+		}
+	}
+	s.mode = mode
+}
+
+// LogRegs is a debug helper function to print almost all the sx1276's registers.
+func (s *Sweeper) LogRegs() {
+	var buf, regs [0x50]byte
+	buf[0] = 1
+	s.spi.Tx(buf[:], regs[:])
+	regs[0] = 0 // no real data there
+	s.log("     0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F")
+	for i := 0; i < len(regs); i += 16 {
+		line := fmt.Sprintf("%02x:", i)
+		for j := 0; j < 16 && i+j < len(regs); j++ {
+			line += fmt.Sprintf(" %02x", regs[i+j])
+		}
+		s.log(line)
+	}
+}
+
+// writeReg writes one or multiple registers starting at addr, the sx1276 auto-increments (except
+// for the FIFO register where that wouldn't be desirable).
+func (s *Sweeper) writeReg(addr byte, data ...byte) {
+	wBuf := make([]byte, len(data)+1)
+	rBuf := make([]byte, len(data)+1)
+	wBuf[0] = addr | 0x80
+	copy(wBuf[1:], data)
+	s.spi.Tx(wBuf[:], rBuf[:])
+}
+
+// readReg reads one register and returns its value.
+func (s *Sweeper) readReg(addr byte) byte {
+	var buf [2]byte
+	s.spi.Tx([]byte{addr & 0x7f, 0}, buf[:])
+	return buf[1]
+}
+
+// readReg16 reads one 16-bit register and returns its value.
+func (s *Sweeper) readReg16(addr byte) uint16 {
+	var buf [3]byte
+	s.spi.Tx([]byte{addr & 0x7f, 0, 0}, buf[:])
+	return (uint16(buf[1]) << 8) | uint16(buf[2])
+}
+
+// readReg24 reads one 24-bit register and returns its value.
+func (s *Sweeper) readReg24(addr byte) uint32 {
+	var buf [4]byte
+	s.spi.Tx([]byte{addr & 0x7f, 0, 0, 0}, buf[:])
+	return (uint32(buf[1]) << 16) | (uint32(buf[2]) << 8) | uint32(buf[3])
+}
