@@ -41,8 +41,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/periph/conn/gpio"
-	"github.com/google/periph/conn/spi"
+	"github.com/tve/devices"
 )
 
 const rxChanCap = 4 // queue up to 4 received packets before dropping
@@ -53,12 +52,12 @@ type Radio struct {
 	TxChan chan<- []byte    // channel to transmit packets
 	RxChan <-chan *RxPacket // channel for received packets
 	// configuration
-	spi     spi.ConnCloser // SPI device to access the radio
-	intrPin gpio.PinIn     // interrupt pin for RX and TX interrupts
-	intrCnt int            // count interrupts
-	sync    []byte         // sync bytes
-	freq    uint32         // center frequency
-	rate    uint32         // bit rate from table
+	spi     devices.SPI  // SPI device to access the radio
+	intrPin devices.GPIO // interrupt pin for RX and TX interrupts
+	intrCnt int          // count interrupts
+	sync    []byte       // sync bytes
+	freq    uint32       // center frequency
+	rate    uint32       // bit rate from table
 	// state
 	sync.Mutex                // guard concurrent access to the radio
 	mode       byte           // current operation mode
@@ -88,8 +87,8 @@ type Rate struct {
 // key is the bit rate in bits per second. In order to operate at a new bit rate the table can be
 // extended by the client.
 var Rates = map[uint32]Rate{
-	49230: {45000, 0, 0x4A, 0x42}, // used by jeelabs driver
-	50000: {45000, 0, 0x4A, 0x42}, // nice round number
+	49230: {90000, 0, 0x42, 0x42}, // used by jeelabs driver
+	50000: {90000, 0, 0x42, 0x42}, // nice round number
 }
 
 // TODO: check whether the following is a better setting for 50kbps:
@@ -118,7 +117,7 @@ type RxPacket struct {
 // Received packets will be sent on the returned rxChan, which has a small amount of
 // buffering. The rxChan will be closed if a persistent error occurs when
 // communicating with the device, use the Error() function to retrieve the error.
-func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
+func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
 		spi: dev, intrPin: intr,
 		mode: 255,
@@ -133,7 +132,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	if err := dev.Speed(4 * 1000 * 1000); err != nil {
 		return nil, fmt.Errorf("sx1231: cannot set speed, %v", err)
 	}
-	if err := dev.Configure(spi.Mode0, 8); err != nil {
+	if err := dev.Configure(devices.SPIMode0, 8); err != nil {
 		return nil, fmt.Errorf("sx1231: cannot set mode, %v", err)
 	}
 
@@ -199,7 +198,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r.TxChan = r.txChan
 
 	// Initialize interrupt pin.
-	if err := r.intrPin.In(gpio.Float, gpio.RisingEdge); err != nil {
+	if err := r.intrPin.In(devices.GpioRisingEdge); err != nil {
 		return nil, fmt.Errorf("sx1231: error initializing interrupt pin: %s", err)
 	}
 
@@ -216,6 +215,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 		return nil, fmt.Errorf("sx1231: interrupts from radio do not work, try unexporting gpio%d", r.intrPin.Number())
 	}
 	r.writeReg(REG_DIOMAPPING1, DIO_MAPPING)
+	// Flush any addt'l interrupts.
 	for r.intrPin.WaitForEdge(0) {
 	}
 
@@ -369,14 +369,14 @@ func (r *Radio) worker() {
 	intrStop := make(chan struct{})
 	go func() {
 		// Make sure we're not missing an initial edge due to a race condition.
-		if r.intrPin.Read() == gpio.High {
+		if r.intrPin.Read() == devices.GpioHigh {
 			intrChan <- struct{}{}
 		}
 		for {
 			if r.intrPin.WaitForEdge(time.Second) {
 				//r.log("interrupt")
 				intrChan <- struct{}{}
-			} else if r.intrPin.Read() == gpio.High {
+			} else if r.intrPin.Read() == devices.GpioHigh {
 				r.log("Interrupt was delayed!")
 				intrChan <- struct{}{}
 			} else {
@@ -421,7 +421,7 @@ func (r *Radio) worker() {
 	// Signal to clients that something is amiss.
 	close(r.rxChan)
 	close(intrStop)
-	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
+	r.intrPin.In(devices.GpioNoEdge) // causes interrupt goroutine to exit
 	r.spi.Close()
 }
 
@@ -507,7 +507,7 @@ func (r *Radio) intrReceive() {
 		r.setMode(MODE_RECEIVE)
 	}()*/
 
-	// Assume we get an interrupt before the packet is received.
+	// Assume we may get an interrupt before the packet is fully received.
 	t0 := time.Now()
 	var crcOK bool
 	for {
@@ -525,7 +525,7 @@ func (r *Radio) intrReceive() {
 		}
 		// Timeout so we don't get stuck here.
 		if time.Since(t0).Seconds() > 100.0*8/50000 { // 100 bytes @50khz
-			dbgPush("   timeout")
+			r.log("RX timeout")
 			return
 		}
 	}

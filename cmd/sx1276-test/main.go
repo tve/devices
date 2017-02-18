@@ -46,10 +46,10 @@ func main() {
 	log.Printf("Initializing LoRA radio...")
 	t0 := time.Now()
 	radio, err := sx1276.New(spi1276, intrPin, sx1276.RadioOpts{
-		Sync:   0x06,
-		Freq:   434000000,
-		Config: "bw500cr45sf128",
-		Logger: log.Printf,
+		Sync:   0xCB,
+		Freq:   432600000,
+		Config: "bw62cr46sf9",
+		Logger: nil, //log.Printf,
 	})
 	panicIf(err)
 	rxChan, txChan := radio.RxChan, radio.TxChan
@@ -57,19 +57,16 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "tx" {
 
-		for i := 1; i <= 2; i++ {
-			log.Printf("Sending packet %d ...", i)
+		for i := 1; i <= 100000; i++ {
+			db := byte(20 - (i & 15))
+			log.Printf("Sending packet %d @%ddBm...", i, db)
+			radio.SetPower(db)
 			t0 = time.Now()
-			if i&1 == 0 {
-				radio.SetPower(10)
-			} else {
-				radio.SetPower(16)
-			}
 			//msg := "\x01Hello there, these are 60 chars............................"
-			msg := fmt.Sprintf("\x01Hello %03d", i)
+			msg := fmt.Sprintf("\x01Hello @%02ddBm %03d", db, i)
 			txChan <- []byte(msg)
-			log.Printf("Sent in %.1fms", time.Since(t0).Seconds()*1000)
-			time.Sleep(100 * time.Millisecond)
+			//log.Printf("Sent in %.1fms", time.Since(t0).Seconds()*1000)
+			time.Sleep(500 * time.Millisecond)
 			panicIf(radio.Error())
 		}
 
@@ -79,9 +76,10 @@ func main() {
 	} else {
 
 		log.Printf("Receiving packets ...")
+		radio.SetPower(17)
 		for pkt := range rxChan {
-			log.Printf("Got len=%d snr=%ddB rssi=%ddB fei=%dHz %q",
-				len(pkt.Payload), pkt.Snr, pkt.Rssi, pkt.Fei, string(pkt.Payload))
+			log.Printf("Got len=%d snr=%ddB rssi=%ddBm fei=%dHz lna=%d %q",
+				len(pkt.Payload), pkt.Snr, pkt.Rssi, pkt.Fei, pkt.Lna, string(pkt.Payload))
 		}
 	}
 }

@@ -36,8 +36,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/periph/conn/gpio"
-	"github.com/google/periph/conn/spi"
+	"github.com/tve/devices"
 )
 
 const rxChanCap = 4 // queue up to 4 received packets before dropping
@@ -48,12 +47,12 @@ type Radio struct {
 	TxChan chan<- []byte    // channel to transmit packets
 	RxChan <-chan *RxPacket // channel for received packets
 	// configuration
-	spi     spi.ConnCloser // SPI device to access the radio
-	intrPin gpio.PinIn     // interrupt pin for RX and TX interrupts
-	intrCnt int            // count interrupts
-	sync    byte           // sync byte
-	//freq    uint32         // center frequency
-	//config  string         // entry in Configs table being used
+	spi     devices.SPI  // SPI device to access the radio
+	intrPin devices.GPIO // interrupt pin for RX and TX interrupts
+	intrCnt int          // count interrupts
+	sync    byte         // sync byte
+	freq    uint32       // center frequency in Hz
+	config  string       // entry in Configs table being used
 	// state
 	sync.Mutex                // guard concurrent access to the radio
 	mode       byte           // current operation mode
@@ -81,25 +80,39 @@ type Config struct {
 
 // Configs is the table of supported configurations and their corresponding register settings.
 // In order to operate at a new bit rate the table can be extended by the client.
+// The names use bw: bandwidth in kHz, cr: coding rate 4/5..4/8, and sf: spreading factor.
 var Configs = map[string]Config{
 	// Configurations from radiohead library, the first one is fast for short range, the
 	// second intermediate for medium range, and the last two slow for long range.
-	"bw500cr45sf128":// 500Khz bandwidth, 4/5 coding rate, spreading fct 128 = bps
-	{0x92, 0x74, 0x00},
-	"bw125cr45sf128":// 125Khz bandwidth, 4/5 coding rate, spreading fct 128 = bps
-	{0x72, 0x74, 0x00},
-	"bw125cr48sf4096":// 125Khz bandwidth, 4/8 coding rate, spreading fct 4096 = bps
-	{0x78, 0xc4, 0x00},
-	"bw31cr48sf512":// 31.25Khz bandwidth, 4/8 coding rate, spreading fct 512 = bps
-	{0x48, 0x94, 0x00},
+	"bw500cr45sf7":  {0x92, 0x74, 0x04}, // 31250bps, 20 byte pkt in 14ms
+	"bw125cr45sf7":  {0x72, 0x74, 0x04}, // 7813bps, 20 byte pkt in 57ms
+	"bw125cr48sf12": {0x78, 0xc4, 0x04}, // 183bps
+	"bw31cr48sf9":   {0x48, 0x94, 0x04}, // 275bps
+	// Configurations from 15625bps down to 163bps in steps of 6dBm sensitivity (plus one
+	// extra setting at -136dBm thrown in).
+	"bw10cr46sf9":  {0x14, 0x94, 0x0C}, // 163bps, 20 byte pkt in 2.5sec, -140dBm
+	"bw10cr46sf7":  {0x14, 0x74, 0x04}, // 650bps, 20 bytes pkt in 766ms, -136dBm
+	"bw62cr46sf9":  {0x64, 0x94, 0x04}, // 977bps, 20 byte pkt in 411ms, -134dBm
+	"bw62cr46sf7":  {0x64, 0x74, 0x04}, // 3906bps, 20 byte pkt in 128ms, -128dBm
+	"bw250cr45sf7": {0x82, 0x74, 0x04}, // 15625bps, 20 byte pkt in 28ms, -122dBm
+	// Configurations from LoRaWAN standard.
+	"lora.bw125sf12": {0x72, 0xc4, 0x0C}, // 250bps, -137dBm
+	"lora.bw125sf11": {0x72, 0xb4, 0x0C}, // 440bps, -136dBm
+	"lora.bw125sf10": {0x72, 0xa4, 0x04}, // 980bps, -134dBm
+	"lora.bw125sf9":  {0x72, 0x94, 0x04}, // 1760bps, -131dBm
+	"lora.bw125sf8":  {0x72, 0x84, 0x04}, // 3125bps, -128dBm
+	"lora.bw125sf7":  {0x72, 0x74, 0x04}, // 5470bps, -125dBm
+	"lora.bw250sf7":  {0x82, 0x74, 0x04}, // 11000bps, -122dBm
 }
 
 // RxPacket is a received packet with stats.
 type RxPacket struct {
-	Payload []byte // payload, excluding length & crc
-	Snr     int    // signal-to-noise in dB for packet
-	Rssi    int    // rssi in dB for packet
-	Fei     int    // frequency error for packet
+	Payload []byte    // payload, excluding length & crc
+	Snr     int       // signal-to-noise in dB for packet
+	Rssi    int       // rssi in dB for packet
+	Fei     int       // frequency error in Hz for packet
+	Lna     int       // dB of LNA applied
+	At      time.Time // time of recv interrupt
 }
 
 // New initializes an sx1276 Radio given an spi.Conn and an interrupt pin, and places the radio
@@ -109,7 +122,7 @@ type RxPacket struct {
 // Received packets will be sent on the returned rxChan, which has a small amount of
 // buffering. The rxChan will be closed if a persistent error occurs when
 // communicating with the device, use the Error() function to retrieve the error.
-func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
+func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
 		spi: dev, intrPin: intr,
 		mode: 255,
@@ -124,7 +137,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	if err := dev.Speed(4 * 1000 * 1000); err != nil {
 		return nil, fmt.Errorf("sx1276: cannot set speed, %v", err)
 	}
-	if err := dev.Configure(spi.Mode0, 8); err != nil {
+	if err := dev.Configure(devices.SPIMode0, 8); err != nil {
 		return nil, fmt.Errorf("sx1276: cannot set mode, %v", err)
 	}
 
@@ -151,10 +164,19 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 		return nil, err
 	}
 
+	// Try to get the chip out of any mode it may be stuck in...
 	r.setMode(MODE_SLEEP)
+	time.Sleep(10 * time.Millisecond)
+	r.setMode(MODE_STANDBY)
 
 	// Detect chip version.
 	r.log("SX1276 version %#x", r.readReg(REG_VERSION))
+
+	// Better be in standby mode...
+	m := r.readReg(REG_OPMODE)
+	if m != 0x88+MODE_STANDBY {
+		return nil, fmt.Errorf("sx1276: can't put radio into standby mode: %#x", m)
+	}
 
 	// Write the configuration into the registers.
 	for i := 0; i < len(configRegs)-1; i += 2 {
@@ -164,6 +186,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	// Configure the transmission parameters.
 	r.SetConfig(opts.Config)
 	r.SetFrequency(opts.Freq)
+	r.SetPower(17)
 
 	//r.sync = opts.Sync
 	r.spi.Tx([]byte{REG_SYNC | 0x80, opts.Sync}, []byte{0, 0})
@@ -176,7 +199,7 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r.TxChan = r.txChan
 
 	// Initialize interrupt pin.
-	if err := r.intrPin.In(gpio.Float, gpio.RisingEdge); err != nil {
+	if err := r.intrPin.In(devices.GpioRisingEdge); err != nil {
 		return nil, fmt.Errorf("sx1276: error initializing interrupt pin: %s", err)
 	}
 
@@ -190,8 +213,13 @@ func New(dev spi.ConnCloser, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r.send([]byte{0})
 	if !r.intrPin.WaitForEdge(time.Second) {
 		r.logRegs()
-		r.log("Interrupt pin is %v", r.intrPin.Read())
-		return nil, fmt.Errorf("sx1276: interrupts from radio do not work, try unexporting gpio%d", r.intrPin.Number())
+		v := r.intrPin.Read()
+		r.log("Interrupt pin is %v", v)
+		if v == devices.GpioHigh {
+			return nil, fmt.Errorf("sx1276: interrupts from radio do not work, try unexporting gpio%d", r.intrPin.Number())
+		} else {
+			return nil, fmt.Errorf("sx1276: the radio is not generating an interrupt, odd...")
+		}
 	}
 	r.writeReg(REG_IRQFLAGS, 0xff) // clear IRQ
 	time.Sleep(10 * time.Millisecond)
@@ -227,10 +255,12 @@ func (r *Radio) SetFrequency(freq uint32) {
 	frf := (freq << 2) / (32000000 >> 11)
 	//log.Printf("SetFreq: %d %d %02x %02x %02x", freq, uint32(frf<<6),
 	//	byte(frf>>10), byte(frf>>2), byte(frf<<6))
+	mode := r.mode
 	r.setMode(MODE_STANDBY)
 	r.writeReg(REG_FRFMSB, byte(frf>>10), byte(frf>>2), byte(frf<<6))
 	r.log("SetFreq %dHz -> %#x %#x %#x", freq, byte(frf>>10), byte(frf>>2), byte(frf<<6))
-	r.setMode(MODE_RX_CONT)
+	r.setMode(mode)
+	r.freq = freq
 }
 
 // SetConfig sets the modem configuration using one of the entries in the Configs table.
@@ -240,12 +270,23 @@ func (r *Radio) SetConfig(config string) {
 	if !found {
 		return
 	}
+	r.log("SetConfig %s", config)
 
+	mode := r.mode
 	r.setMode(MODE_STANDBY)
 	r.writeReg(REG_MODEMCONF1, conf.Conf1&^1)        // Explicit header mode
 	r.writeReg(REG_MODEMCONF2, conf.Conf2&0xf0|0x04) // TxSingle, CRC enable
 	r.writeReg(REG_MODEMCONF3, conf.Conf3|0x04)      // enable LNA AGC
-	r.setMode(MODE_RX_CONT)
+	r.setMode(mode)
+	r.config = config
+}
+
+// bandwidth returns the current signal bandwidth in Hz
+func (r *Radio) bandwidth() int {
+	return []int{
+		7800, 10400, 15600, 20800, 31250, 41700, 62500, 125000, 250000, 500000,
+		0, 0, 0, 0, 0, 0, // invalid settings
+	}[Configs[r.config].Conf1>>4]
 }
 
 // SetPower configures the radio for the specified output power. It only supports the high-power
@@ -261,15 +302,16 @@ func (r *Radio) SetPower(dBm byte) {
 		dBm = 20
 	}
 	r.log("SetPower %ddBm", dBm)
+	mode := r.mode
 	r.setMode(MODE_STANDBY)
 	if dBm > 17 {
-		r.writeReg(REG_PADAC, 0x07) // turn 20dBm mode on, this offsets the PACONFIG by 3
+		r.writeReg(REG_PADAC, 0x87) // turn 20dBm mode on, this offsets the PACONFIG by 3
 		r.writeReg(REG_PACONFIG, 0xf0+dBm-5)
 	} else {
 		r.writeReg(REG_PACONFIG, 0xf0+dBm-2)
-		r.writeReg(REG_PADAC, 0x04)
+		r.writeReg(REG_PADAC, 0x84)
 	}
-	r.setMode(MODE_RX_CONT)
+	r.setMode(mode)
 }
 
 // LogPrintf is a function used by the driver to print logging info.
@@ -288,14 +330,6 @@ func (r *Radio) SetLogger(l LogPrintf) {
 func (r *Radio) Error() error { return r.err }
 
 //
-
-// rxInfo contains stats about a received packet.
-type rxInfo struct {
-	rssi int // rssi value for current packet
-	lna  int // low noise amp gain for current packet
-	fei  int // frequency error for current packet
-	afc  int // frequency correction applied for current packet
-}
 
 // setMode changes the radio's operating mode and changes the interrupt cause (if necessary).
 func (r *Radio) setMode(mode byte) {
@@ -319,7 +353,7 @@ func (r *Radio) setMode(mode byte) {
 
 	// Set the new mode.
 	r.writeReg(REG_OPMODE, mode+0x88) // LoRA mode & LF
-	r.log("Mode %#x", mode)
+	//r.log("mode w=%#x r=%#x", mode+0x88, r.readReg(REG_OPMODE))
 	r.mode = mode
 }
 
@@ -333,34 +367,36 @@ func (r *Radio) receiving() bool {
 	}
 	st := r.readReg(REG_MODEMSTAT)
 	irq := r.readReg(REG_IRQFLAGS)
-	return st&MODEM_CLEAR != 0 && irq&IRQ_RXDONE == 0
+	return st&0xA != 0 || irq&IRQ_RXDONE != 0
 }
 
 // worker is an endless loop that processes interrupts for reception as well as packets
 // enqueued for transmit.
 func (r *Radio) worker() {
 	// Interrupt goroutine converting WaitForEdge to a channel.
-	intrChan := make(chan struct{})
+	intrChan := make(chan time.Time)
 	intrStop := make(chan struct{})
 	go func() {
 		// Make sure we're not missing an initial edge due to a race condition.
-		if r.intrPin.Read() == gpio.High {
-			intrChan <- struct{}{}
+		if r.intrPin.Read() == devices.GpioHigh {
+			intrChan <- time.Now()
 		}
 		for {
 			if r.intrPin.WaitForEdge(time.Second) {
 				// CHIP does BothEdges on the XIO pins, so we get extra intrs
-				if r.intrPin.Read() == gpio.High {
-					r.log("interrupt")
-					intrChan <- struct{}{}
+				if r.intrPin.Read() == devices.GpioHigh {
+					//r.log("interrupt")
+					intrChan <- time.Now()
 				} else {
-					r.log("end-of-interrupt")
+					//r.log("end-of-interrupt")
 				}
-			} else if r.intrPin.Read() == gpio.High {
+			} else if r.intrPin.Read() == devices.GpioHigh {
 				r.log("Interrupt was missed!")
-				intrChan <- struct{}{}
+				intrChan <- time.Now()
 			} else {
-				r.log("IRQ flags: %#x", r.readReg(REG_IRQFLAGS))
+				//r.log("Mode: %#x, IRQ flags: %#x, modem: %#x",
+				//	r.readReg(REG_OPMODE), r.readReg(REG_IRQFLAGS),
+				//	r.readReg(REG_MODEMSTAT))
 				select {
 				case <-intrStop:
 					r.log("sx1276: rx interrupt goroutine exiting")
@@ -374,12 +410,12 @@ func (r *Radio) worker() {
 	for r.err == nil {
 		select {
 		// interrupt
-		case <-intrChan:
+		case at := <-intrChan:
 			r.intrCnt++
 			// What this interrupt is about depends on the current mode.
 			switch r.mode {
 			case MODE_RX_CONT:
-				r.intrReceive()
+				r.intrReceive(at)
 			case MODE_TX:
 				r.setMode(MODE_RX_CONT)
 			default:
@@ -390,7 +426,7 @@ func (r *Radio) worker() {
 		// Something to transmit.
 		case payload := <-r.txChan:
 			if r.receiving() {
-				r.intrReceive() // TODO: doesn't work, need to busy-wait
+				r.intrReceive(time.Now()) // TODO: doesn't work, need to busy-wait
 			}
 			if r.err == nil {
 				r.send(payload)
@@ -401,7 +437,7 @@ func (r *Radio) worker() {
 	// Signal to clients that something is amiss.
 	close(r.rxChan)
 	close(intrStop)
-	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
+	r.intrPin.In(devices.GpioNoEdge) // causes interrupt goroutine to exit
 	r.spi.Close()
 }
 
@@ -421,10 +457,20 @@ func (r *Radio) send(payload []byte) {
 	r.setMode(MODE_TX)
 }
 
-func (r *Radio) intrReceive() {
-	if irq := r.readReg(REG_IRQFLAGS); irq&IRQ_RXDONE == 0 {
-		// spurious interrupt?
-		r.log("RX interrupt but no packet received")
+func (r *Radio) intrReceive(at time.Time) {
+	irq := r.readReg(REG_IRQFLAGS)
+	switch {
+	case irq&IRQ_CRCERR != 0:
+		r.log("RX CRC error (%#x)", irq)
+		return
+	case irq&IRQ_RXDONE == 0: // spurious interrupt?
+		r.log("RX interrupt but no packet received (%#x)", irq)
+		return
+	case irq != 0x40:
+		r.log("RX OK??? (%#x)", irq)
+	}
+	if (r.readReg(REG_HOPCHAN) & 0x40) == 0 {
+		r.log("RX packet without CRC")
 		return
 	}
 
@@ -437,16 +483,22 @@ func (r *Radio) intrReceive() {
 	r.spi.Tx(wBuf[:len+1], rBuf[:len+1])
 
 	// Grab SNR, RSSI and FEI
-	snr := int(r.readReg(REG_PKTSNR)) / 4
-	rssi := int(uint32(int(r.readReg(REG_PKTRSSI))))
+	snr := int(int8(r.readReg(REG_PKTSNR))) / 4
+	rssi := int(r.readReg(REG_PKTRSSI))
 	rssi = -164 + rssi + rssi>>4
 	if snr < 0 {
 		rssi += snr
 	}
-	//fei := r.readReg24(REG_FEI)
+	// if rssi > 0 { // sometimes the value fetched is way off, sigh...
+	// fmt.Printf("RSSI %d SNR %d reg %d\n", rssi, snr, r.readReg(REG_PKTRSSI))
+	// }
+	f1 := int32(r.readReg24(REG_FEI))
+	f2 := int64((f1 << 12) >> 12)                  // sign-extend 20-bit value
+	fei := int(f2 * int64(r.bandwidth()) / 953674) // 953674=32Mhz*500/2^24
+	lna := int(r.readReg(REG_LNA) >> 5)
 
 	// Push packet into channel.
-	pkt := RxPacket{Payload: rBuf[1 : len+1], Snr: snr, Rssi: rssi}
+	pkt := RxPacket{Payload: rBuf[1 : len+1], Snr: snr, Rssi: rssi, Fei: fei, Lna: lna, At: at}
 	select {
 	case r.rxChan <- &pkt:
 	default:
@@ -456,7 +508,7 @@ func (r *Radio) intrReceive() {
 
 // logRegs is a debug helper function to print almost all the sx1276's registers.
 func (r *Radio) logRegs() {
-	var buf, regs [0x50]byte
+	var buf, regs [0x71]byte
 	buf[0] = 1
 	r.spi.Tx(buf[:], regs[:])
 	regs[0] = 0 // no real data there
@@ -498,5 +550,6 @@ func (r *Radio) readReg16(addr byte) uint16 {
 func (r *Radio) readReg24(addr byte) uint32 {
 	var buf [4]byte
 	r.spi.Tx([]byte{addr & 0x7f, 0, 0, 0}, buf[:])
+	r.log("reg24: %+v", buf[1:4])
 	return (uint32(buf[1]) << 16) | (uint32(buf[2]) << 8) | uint32(buf[3])
 }

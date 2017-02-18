@@ -1,2 +1,2 @@
 #! /usr/bin/fish
-env GOARCH=arm go build .; and rsync sx1231-test chip4:; and ssh chip4 "bash -c 'sudo ./sx1231-test'"
+env GOARCH=arm go build .; and rsync sx1231-test chip6:; and ssh chip6 "bash -c 'sudo ./sx1231-test'"
