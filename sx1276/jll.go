@@ -33,15 +33,15 @@ import "fmt"
 //  0: empty packet, typically used for acks, may have an info trailer.
 //  1: node details: Vstart[mV], Vend[mV], Temp[cC], PktSent, PktRecv, Pout[dBm],
 //     Fadj[Hz], RSSIavg[dBm].
-func JLLEncode(hdr byte, toGW bool, node byte, kind byte, payload []byte, rssi, fei int) []byte {
+func JLLEncode(kind byte, toGW bool, node byte, fmt byte, payload []byte, rssi, fei int) []byte {
 	pkt := make([]byte, len(payload)+4)
 	// Header.
-	pkt[0] = (hdr & 2 << 6) | (hdr & 1 << 5) | (node & 0x1f)
+	pkt[0] = (kind & 2 << 6) | (kind & 1 << 5) | (node & 0x1f)
 	if !toGW {
 		pkt[0] |= 0x40
 	}
 	// Packet type.
-	pkt[1] = kind & 0x7f
+	pkt[1] = fmt & 0x7f
 	copy(pkt[2:2+len(payload)], payload)
 	if rssi == 0 {
 		return pkt[0 : 2+len(payload)]
@@ -83,10 +83,10 @@ const (
 
 // JLLRxPacket holds a decoded JeeLabs LoRa packet.
 type JLLRxPacket struct {
-	Hdr     byte // one of the 4 packet kinds
+	Kind    byte // one of the 4 packet kinds
 	ToGW    bool // direction: to/from gateway
 	Node    byte // node number
-	Kind    byte // packet type
+	Fmt     byte // packet format
 	RemRSSI int  // rssi from trailer, 0 if none
 	RemFEI  int  // fei from trailer, none if rssi==0
 	RxPacket
@@ -104,10 +104,10 @@ func JLLDecode(packet *RxPacket) (*JLLRxPacket, error) {
 			len(packet.Payload))
 	}
 
-	jlPkt.Hdr = (jlPkt.Payload[0] & 0x80 >> 6) | (jlPkt.Payload[0] & 0x20 >> 5)
+	jlPkt.Kind = (jlPkt.Payload[0] & 0x80 >> 6) | (jlPkt.Payload[0] & 0x20 >> 5)
 	jlPkt.ToGW = jlPkt.Payload[0]&0x40 == 0
 	jlPkt.Node = jlPkt.Payload[0] & 0x1f
-	jlPkt.Kind = jlPkt.Payload[1] & 0x7f
+	jlPkt.Fmt = jlPkt.Payload[1] & 0x7f
 	if jlPkt.Payload[1]&0x80 == 0 || len(packet.Payload) < 4 {
 		jlPkt.Payload = jlPkt.Payload[2:]
 		//log.Printf("No info: %+v -> %+v", packet, jlPkt)
