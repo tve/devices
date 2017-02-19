@@ -73,9 +73,10 @@ type RadioOpts struct {
 // Config describes the SX127x configuration to achieve a specific bandwidth, spreading factor,
 // and coding rate.
 type Config struct {
-	Conf1 byte // ModemConfig1: bw, coding rate, implicit/expl header
-	Conf2 byte // ModemConfig2: sperading, mode, crc
-	Conf3 byte // ModemConfig3: low data rate opt, LNA gain
+	Conf1 byte   // ModemConfig1: bw, coding rate, implicit/expl header
+	Conf2 byte   // ModemConfig2: sperading, mode, crc
+	Conf3 byte   // ModemConfig3: low data rate opt, LNA gain
+	Info  string // info for humans
 }
 
 // Configs is the table of supported configurations and their corresponding register settings.
@@ -84,25 +85,18 @@ type Config struct {
 var Configs = map[string]Config{
 	// Configurations from radiohead library, the first one is fast for short range, the
 	// second intermediate for medium range, and the last two slow for long range.
-	"bw500cr45sf7":  {0x92, 0x74, 0x04}, // 31250bps, 20 byte pkt in 14ms
-	"bw125cr45sf7":  {0x72, 0x74, 0x04}, // 7813bps, 20 byte pkt in 57ms
-	"bw125cr48sf12": {0x78, 0xc4, 0x04}, // 183bps
-	"bw31cr48sf9":   {0x48, 0x94, 0x04}, // 275bps
-	// Configurations from 15625bps down to 163bps in steps of 6dBm sensitivity (plus one
-	// extra setting at -136dBm thrown in).
-	"bw10cr46sf9":  {0x14, 0x94, 0x0C}, // 163bps, 20 byte pkt in 2.5sec, -140dBm
-	"bw10cr46sf7":  {0x14, 0x74, 0x04}, // 650bps, 20 bytes pkt in 766ms, -136dBm
-	"bw62cr46sf9":  {0x64, 0x94, 0x04}, // 977bps, 20 byte pkt in 411ms, -134dBm
-	"bw62cr46sf7":  {0x64, 0x74, 0x04}, // 3906bps, 20 byte pkt in 128ms, -128dBm
-	"bw250cr45sf7": {0x82, 0x74, 0x04}, // 15625bps, 20 byte pkt in 28ms, -122dBm
+	"lora.bw500cr45sf7":  {0x92, 0x74, 0x04, "31250bps, 20B in   14ms"},
+	"lora.bw125cr45sf7":  {0x72, 0x74, 0x04, " 7813bps, 20B in   57ms"},
+	"lora.bw125cr48sf12": {0x78, 0xc4, 0x04, "  183bps, 20B in 1712ms"},
+	"lora.bw31cr48sf9":   {0x48, 0x94, 0x04, "  275bps, 20B in  987ms"},
 	// Configurations from LoRaWAN standard.
-	"lora.bw125sf12": {0x72, 0xc4, 0x0C}, // 250bps, -137dBm
-	"lora.bw125sf11": {0x72, 0xb4, 0x0C}, // 440bps, -136dBm
-	"lora.bw125sf10": {0x72, 0xa4, 0x04}, // 980bps, -134dBm
-	"lora.bw125sf9":  {0x72, 0x94, 0x04}, // 1760bps, -131dBm
-	"lora.bw125sf8":  {0x72, 0x84, 0x04}, // 3125bps, -128dBm
-	"lora.bw125sf7":  {0x72, 0x74, 0x04}, // 5470bps, -125dBm
-	"lora.bw250sf7":  {0x82, 0x74, 0x04}, // 11000bps, -122dBm
+	"lorawan.bw125sf12": {0x72, 0xc4, 0x0C, "  250bps, 20B in 1319ms, -137dBm"},
+	"lorawan.bw125sf11": {0x72, 0xb4, 0x0C, "  440bps, 20B in  660ms, -136dBm"},
+	"lorawan.bw125sf10": {0x72, 0xa4, 0x04, "  980bps, 20B in  370ms, -134dBm"},
+	"lorawan.bw125sf9":  {0x72, 0x94, 0x04, " 1760bps, 20B in  185ms, -131dBm"},
+	"lorawan.bw125sf8":  {0x72, 0x84, 0x04, " 3125bps, 20B in  103ms, -128dBm"},
+	"lorawan.bw125sf7":  {0x72, 0x74, 0x04, " 5470bps, 20B in   57ms, -125dBm"},
+	"lorawan.bw250sf7":  {0x82, 0x74, 0x04, "11000bps, 20B in   28ms, -122dBm"},
 }
 
 // RxPacket is a received packet with stats.
