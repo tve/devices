@@ -12,5 +12,24 @@ a simple header and a simple ACK scheme.
 On the FSK side the gateway uses the JeeLabs packet format and ACK protocol.
 
 The MQTT interface is very simple and maps packets received from radios to a
-topic that ends in the radio node id and packet type. It subscribes to a separate
+topic that ends in the radio node id. It subscribes to a separate
 set of topics for Tx.
+
+## MQTT
+
+For each radio an MQTT topic prefix may be specified. A packet received from node N
+is published to topic `<prefix>/rx/<N>` with a payload consisting of the packet payload without
+headers or trailers or CRC. The GW subscribes to topics `<prefix>/tx/+` and transmits
+packets to the node identified by the last element of the topic.
+
+## LoRa protocol
+
+The protocol used for LoRa is the JeeLabs LoRa (JLL) protocol & packet format. See
+`jll.go` in the sx1276 driver. The gateway responds to incoming data packets requesting an ACK
+with an immediate ACK. The gateway sends packets out without requesting an ACK.
+(The plan is to queue outgoing packets until the node polls the GW, but this is not yet
+implemented.)
+
+## FSK protocol
+
+The protocol used for FSK is the JeeLabs packet format and ACK protocol. Details TBD...
