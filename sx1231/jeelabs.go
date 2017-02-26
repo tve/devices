@@ -47,6 +47,14 @@ type JLRxPacket struct {
 	RxPacket
 }
 
+// IsAck returns true if the packet is an ACK.
+func (p *JLRxPacket) IsAck() bool { return false }
+
+// MakeAck returns an ACK packet given a received JLPacket with the ack bit set.
+func (p *JLRxPacket) MakeAck(grp byte) []byte {
+	return JLEncode(grp, p.Dst, p.Src, false, nil)
+}
+
 // JLDecode decodes a JeeLabs packet. See JLEncode for a description of the
 // packet format.
 func JLDecode(grp byte, packet *RxPacket) (*JLRxPacket, error) {
@@ -75,19 +83,11 @@ func JLDecode(grp byte, packet *RxPacket) (*JLRxPacket, error) {
 	return &jlPkt, nil
 }
 
-// JLAckPacket returns an ACK packet given a received JLPacket with the ack bit set.
-func JLAckPacket(rxPacket *JLRxPacket) []byte {
-	return []byte{rxPacket.Dst, rxPacket.Src}
-}
-
 type JLTxPacket struct {
 	Src, Dst byte // source and destination nodes for packet header
 	Ack      bool // ACK request bit for packet header
 	Payload  []byte
 }
-
-// IsAck returns true if the packet is an ACK.
-func (p *JLRxPacket) IsAck() bool { return false }
 
 // JLAckHandler spawns a goroutine that mediates the TX and RX channels in order to retransmit
 // outgoing packets that are unacked and to reply with ACKs when incoming packets request so.

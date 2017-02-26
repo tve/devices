@@ -33,6 +33,7 @@ type GPIO interface {
 	WaitForEdge(timeout time.Duration) bool
 	Out(level int)
 	Number() int
+	Close()
 }
 
 const (
@@ -130,6 +131,8 @@ func (g *gpio) Out(level int) {
 func (g *gpio) Number() int {
 	return g.p.N()
 }
+
+func (g *gpio) Close() { g.p.Close() }
 
 func (g *gpio) edgeCB(embd.DigitalPin) {
 	//fmt.Fprintf(os.Stderr, "Intr %d\n", g.p.N())

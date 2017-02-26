@@ -1,0 +1,50 @@
+# Config file for mqttradio
+
+debug = true                 # true to enable per-packet logging
+
+[mqtt]
+host = "core.voneicken.com"  # required, change to suit your set-up
+port = 1883                  # the conventional MQTT port is 1883
+user = ""
+password = ""
+
+
+#[[radio]] # there may be multiple radios, hence the [[ ]]
+#
+#type     = "lora.sx1276"     # types: lora.sx1276, fsk.rfm69 (rfm69W or CW using PA0),
+#                             # fsk.rfm69h (rfm69HW or HCW using PA_BOOST)
+#prefix   = "lora-gw"         # prefix to use for mqtt topics, a "/rx" and "/tx" will be appended
+#spi_bus  = 0                 # spi_bus and spi_cs correspond to the digits in /dev/spi0.1
+#spi_cs   = 0
+#intr_pin = "XIO-P1"          # the name of the pin used for interrupts from the radio
+#
+## to attach two radios to a bus with a single chip select the chip select can be
+## muxed using an additional gpio pin, leave this undefined if this is not used
+#cs_mux_pin   = "CSID0"       # chip-select multiplexing pin
+#cs_mux_value = 1             # the value of the mux pin for this radio (0 or 1)
+#
+#freq  = 432600               # center frequency in Hz, Khz, or Mhz
+#sync  = "0xcb"               # sync bytes in big endian format
+#rate  = "lorawan.bw125sf8"   # name of modulation and data rate as defined in the driver
+#power = 17                   # output power in dBm
+
+[[radio]]
+
+type     = "fsk.rfm69"
+prefix   = "fsk-gw"
+spi_bus  = 0
+spi_cs   = 0
+intr_pin = "AP-EINT1" # "XIO-P0"
+
+cs_mux_pin   = "CSID0"
+cs_mux_value = 0
+
+freq  = 912500
+sync  = "0xaa2d06"
+rate  = "49233"
+power = 0
+
+[[module]]
+name  = "jl-ack"         # name of module, jl-ack provides ACKs to JeeLabs packets
+sub   = "fsk-gw/rx"      # subscribe to the fsk-gw raw rx topic
+pub   = "fsk-gw/tx"      # publish ACKs to the fsk-gw raw tx topic

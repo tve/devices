@@ -33,3 +33,18 @@ implemented.)
 ## FSK protocol
 
 The protocol used for FSK is the JeeLabs packet format and ACK protocol. Details TBD...
+
+
+- raw packets
+  - fsk:  sync, length, dest, payload, crc
+  - lora: (sync), length, payload, crc
+- JeeLabs headers
+  - fsk:  sync-parity in dest, src w/ack+special bits
+  - lora: dest w/ack+special bits
+- Content format
+  - 1-byte format, followed by data
+  - jcw uses varint format byte
+  - tve uses raw format byte and uses top bit to indicate 2-byte rssi/fei trailer
+- Not accounted for
+  - crypto (secrecy and/or signature)
+
