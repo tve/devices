@@ -34,19 +34,6 @@
 // this should not pose difficulties. The Error function may be called from multiple goroutines
 // and obviously the TX and RX channels work well with concurrency.
 //
-// Notes about the sx1231
-//
-// There are some 20 settings that all interact in undocumented ways, so
-// getting to a robust driver is tricky. The worst is that on the RX side, once RSSI threshold is
-// crossed the radio is locked at some frequency due to AFC and awaits a sync match. If that doesn't
-// happen the receiver is effectively useless until it's reset. This means one either has to get an
-// interrupt on RSSI and apply a timeout after which one restarts RX, or one has to configure the
-// radio's RX timeout and use a second interrupt on that.
-//
-// If AFC is disabled, then the chip performs no FEI measurement, this makes it impossible to
-// automatically tune the carrier frequency. If AFC is enabled and the AFC low-beta offset is also
-// enabled, then the FEI measurement seems bogus and the reported AFC value includes the low-beta
-// offset.
 package sx1231
 
 import (
@@ -456,11 +443,6 @@ func (r *Radio) setMode(mode byte) {
 	for start := time.Now(); time.Since(start) < 100*time.Millisecond; {
 		if val := r.readReg(REG_IRQFLAGS1); val&IRQ1_MODEREADY != 0 {
 			r.mode = mode
-			if mode == MODE_RECEIVE {
-				// uncomment the next line to get the interrupt as soon as RSSI
-				// comes on, useful for troubleshooting
-				//r.writeReg(REG_DIOMAPPING1, DIO_MAPPING+DIO_RSSI)
-			}
 			return
 		}
 	}
@@ -496,7 +478,7 @@ func (r *Radio) worker() {
 		t0 := time.Now()
 		// Loop over interrupts.
 		for {
-			if r.intrPin.WaitForEdge(time.Second) {
+			if r.intrPin.WaitForEdge(10 * time.Second) {
 				//r.log("interrupt %d", r.intrPin.Read())
 				if r.intrPin.Read() == 1 {
 					intrChan <- struct{}{}
@@ -531,11 +513,13 @@ func (r *Radio) worker() {
 				switch {
 				case timeoutPerSec > 10:
 					r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)-1)
+					r.log("RSSI threshold raised: %.2f timeout/sec, %.1fdBm",
+						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
 				case timeoutPerSec < 2.5:
 					r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)+1)
+					r.log("RSSI threshold lowered: %.2f timeout/sec, %.1fdBm",
+						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
 				}
-				r.log("RSSI threshold: %.2f timeout/sec, %.1fdBm **********",
-					timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
 				r.rxTimeout = 0
 				t0 = time.Now()
 			}
@@ -608,20 +592,8 @@ func (r *Radio) intrTransmit() {
 	r.setMode(MODE_RECEIVE)
 }
 
-// intrReceive handles a receive interrupt. The overall strategy is to get the interrupt either when
-// the rssi threshold is crossed or a sync match is found. We then capture rssi and fei as soon as
-// possible and wait for the end of the packet. If that doesn't come in we time out and restart rx,
-// else we can pull the packet out of the fifo.
-//
-// Triggering the interrupt on RSSI threshold risks getting many spurious interrupts, but it also
-// allows us to restart rx if the rx gets lured off-frequency by some noise due to AFC. Triggering
-// on sync match reduces the interrupt freq but runs the AFC risk. Triggering only on
-// packet-received means we don't really get a reliable rssi and fei.
-//
-// Notes: RSSI and AFC must be grabbed after sync match, else they're not yet stable.
-// FEI right after sync match and after payload_ready are the same. RSSI are very similar (the
-// transmission can fade in&out a bit). AFC includes the low-beta offset and thus isn't a good
-// number to use.
+// intrReceive handles a receive interrupt. See the notes in the README about the various
+// possible strategies.
 func (r *Radio) intrReceive() {
 	// Get timestamp and calculate timeout. At 50kbps a 2-byte ACK takes 2ms and a full 66 byte
 	// packet takes 12.3ms.
@@ -639,8 +611,8 @@ func (r *Radio) intrReceive() {
 		return rBuf[1:]
 	}
 
-	// Loop until we have the full packet, or things go south. Grab RSSI & AFC/FEI only if we
-	// can get them before the packet is fully received.
+	// Loop until we have the full packet, or things go south. Grab RSSI & AFC after
+	// sync match and only if we can get them before the packet is fully received.
 	var rssi, fei int
 	for {
 		// See whether we have a full packet.
@@ -673,17 +645,17 @@ func (r *Radio) intrReceive() {
 		}
 		// Timeout so we don't get stuck here.
 		if time.Now().After(tOut) {
-			//r.log("RX timeout! irq1=%#02x irq2=%02x, rssi=%ddBm afc=%dHz", irq1, irq2,
-			//	0-int(r.readReg(REG_RSSIVALUE))/2,
-			//	(int(int16(r.readReg16(REG_AFCMSB)))*(32000000>>13))>>6)
+			r.log("RX timeout! irq1=%#02x irq2=%02x, rssi=%ddBm fei=%dHz", irq1, irq2,
+				0-int(r.readReg(REG_RSSIVALUE))/2,
+				(int(int16(r.readReg16(REG_AFCMSB)))*(32000000>>13))>>6)
 			r.rxTimeout++
 			// Make sure the FIFO is empty (not sure this is necessary).
 			if irq2&IRQ2_FIFONOTEMPTY != 0 {
-				r.log("RX timeout! irq1=%#02x irq2=%02x, rssi=%ddBm afc=%dHz", irq1, irq2,
-					0-int(r.readReg(REG_RSSIVALUE))/2,
-					(int(int16(r.readReg16(REG_AFCMSB)))*(32000000>>13))>>6)
-				buf := readFifo()
-				r.log("FIFO: %+v", buf)
+				//r.log("RX timeout! irq1=%#02x irq2=%02x, rssi=%ddBm afc=%dHz", irq1, irq2,
+				//	0-int(r.readReg(REG_RSSIVALUE))/2,
+				//	(int(int16(r.readReg16(REG_AFCMSB)))*(32000000>>13))>>6)
+				readFifo()
+				//r.log("FIFO: %+v", readFifo())
 			}
 			// Restart Rx.
 			r.writeReg(REG_PKTCONFIG2, 0x16)
@@ -691,17 +663,6 @@ func (r *Radio) intrReceive() {
 		}
 		time.Sleep(time.Millisecond)
 	}
-
-	/* get RSSI and FEI again and see whether they're any different
-	rssi2 := 0 - int(r.readReg(REG_RSSIVALUE))/2
-	f2 := int(int16(r.readReg16(REG_FEIMSB)))
-	fei2 := (f2 * (32000000 >> 13)) >> 6
-	if rssi > rssi2+4 || rssi < rssi2-4 {
-		r.log("First rssi %ddBm != second rssi %ddBm", rssi, rssi2)
-	}
-	if fei != fei2 {
-		r.log("First fei %dHz != second fei %dHz", fei, fei2)
-	}*/
 
 	// Got packet, read it.
 	buf := readFifo()
