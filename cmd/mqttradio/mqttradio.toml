@@ -42,9 +42,25 @@ cs_mux_value = 0
 freq  = 912500
 sync  = "0xaa2d06"
 rate  = "49233"
-power = 0
+power = 13
 
 [[module]]
-name  = "jl-ack"         # name of module, jl-ack provides ACKs to JeeLabs packets
-sub   = "fsk-gw/rx"      # subscribe to the fsk-gw raw rx topic
-pub   = "fsk-gw/tx"      # publish ACKs to the fsk-gw raw tx topic
+name   = "jl-ack"        # name of module, jl-ack provides ACKs to JeeLabs packets
+sub    = "fsk-gw/rx"     # subscribe to the fsk-gw raw rx topic
+pub    = "fsk-gw/tx"     # publish ACKs to the fsk-gw raw tx topic
+offset =   0             # filter on first byte (destination) [default is 0]
+value  =   0             # value must be 0 (address of GW) [default is 0]
+mask   = 255             # compare all bits [default is 0]
+
+[[module]]
+name   = "jl-decode"     # name of module, jl-decode breaks out the packet type into the topic
+sub    = "fsk-gw/rx"     # subscribe to the fsk-gw raw rx topic
+pub    = "fsk-gw/rx/jl"  # publish to fsk-gw/rx/jl/<type>
+offset =   0             # filter on first byte (destination) [default is 0]
+value  =   0             # value must be 0 (address of GW) [default is 0]
+mask   = 255             # compare all bits [default is 0]
+
+[[module]]
+name   = "jl-varint"     # name of module, jl-varint parses the varint payload format
+sub    = "fsk-gw/rx/jl/2"
+pub    = "fsk-gw/rx/vi/2"

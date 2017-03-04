@@ -52,9 +52,12 @@ type RadioConfig struct {
 }
 
 type ModuleConfig struct {
-	Name string
-	Sub  string
-	Pub  string
+	Name   string
+	Sub    string
+	Pub    string
+	Offset int
+	Value  int
+	Mask   int
 }
 
 // muxedSPI opens an SPI bus and uses an extra pin to mux it across two radios.

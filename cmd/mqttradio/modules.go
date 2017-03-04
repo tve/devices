@@ -24,12 +24,10 @@ import (
 type module struct {
 	name   string      // name of the module, needs to be used in the config
 	runner interface{} // func(sub <-chan subChanType, pub pubFunc, debug LogPrintf)
-	//runner reflect.Value // func(sub <-chan subChanType, pub pubFunc, debug LogPrintf)
-	//subChanType reflect.Type  // must be struct{Topic string; Payload <any>}
 }
 
 // pubFunc is the publishing function passed into a runner.
-type pubFunc func(payload interface{})
+type pubFunc func(topicSuffix string, payload interface{})
 
 // modules is a global registry of modules that can be instantiated via config.
 var modules map[string]module
@@ -70,7 +68,9 @@ func hookModule(mc ModuleConfig, mq *mq, debug LogPrintf) error {
 	}
 
 	// Now start the runner goroutine, passing it an appropriate publication function.
-	pubFun := func(payload interface{}) { mq.Publish(mc.Pub, payload) }
+	pubFun := func(topicSuffix string, payload interface{}) {
+		mq.Publish(mc.Pub+topicSuffix, payload)
+	}
 	go func() {
 		runner.Call([]reflect.Value{subChan, reflect.ValueOf(pubFun), reflect.ValueOf(debug)})
 	}()
