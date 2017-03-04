@@ -32,26 +32,26 @@ func Test_JLEncode(t *testing.T) {
 
 func Test_JLDecode(t *testing.T) {
 	for n, tc := range encodings {
-		got, err := JLDecode(tc.grp, &RxPacket{Payload: tc.result})
+		src, dst, ack, pl, err := JLDecode(tc.grp, tc.result)
 		if err != nil {
 			t.Fatalf("Unexpected error %v", err)
 		}
-		if got.Src != tc.src {
-			t.Fatalf("Decoding %s src mismatch, got %d expected %d", n, got.Src, tc.src)
+		if src != tc.src {
+			t.Fatalf("Decoding %s src mismatch, got %d expected %d", n, src, tc.src)
 		}
-		if got.Dst != tc.dst {
-			t.Fatalf("Decoding %s dst mismatch, got %d expected %d", n, got.Dst, tc.dst)
+		if dst != tc.dst {
+			t.Fatalf("Decoding %s dst mismatch, got %d expected %d", n, dst, tc.dst)
 		}
-		if got.Ack != tc.ack {
-			t.Fatalf("Decoding %s ack mismatch, got %d expected %d", n, got.Ack, tc.ack)
+		if ack != tc.ack {
+			t.Fatalf("Decoding %s ack mismatch, got %d expected %d", n, ack, tc.ack)
 		}
-		if len(got.Payload) != len(tc.payload) {
+		if len(pl) != len(tc.payload) {
 			t.Fatalf("Decoding %s length mismatch got %+v expected %+v",
-				n, got.Payload, tc.payload)
+				n, pl, tc.payload)
 		}
-		for i := range got.Payload {
-			if got.Payload[i] != tc.payload[i] {
-				t.Fatalf("Encoding %s got %+v expected %+v", n, got.Payload, tc.payload)
+		for i := range pl {
+			if pl[i] != tc.payload[i] {
+				t.Fatalf("Encoding %s got %+v expected %+v", n, pl, tc.payload)
 			}
 		}
 	}

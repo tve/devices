@@ -40,47 +40,49 @@ func JLEncode(grp, src, dst byte, ack bool, payload []byte) []byte {
 	return p
 }
 
-// JLRxPacket holds a decoded JeeLabs packet.
-type JLRxPacket struct {
-	Src, Dst byte // source and destination nodes from packet header
-	Ack      bool // ACK request bit from packet header
-	RxPacket
-}
-
-// IsAck returns true if the packet is an ACK.
-func (p *JLRxPacket) IsAck() bool { return false }
-
-// MakeAck returns an ACK packet given a received JLPacket with the ack bit set.
-func (p *JLRxPacket) MakeAck(grp byte) []byte {
-	return JLEncode(grp, p.Dst, p.Src, false, nil)
+// MakeJLAck returns an ACK packet given a received payload with the ack bit set.
+func MakeJLAck(grp byte, payload []byte) []byte {
+	if src, dst, ack, _, err := JLDecode(grp, payload); err == nil && ack {
+		return JLEncode(grp, dst, src, false, nil)
+	}
+	return nil
 }
 
 // JLDecode decodes a JeeLabs packet. See JLEncode for a description of the
-// packet format.
-func JLDecode(grp byte, packet *RxPacket) (*JLRxPacket, error) {
-	if packet == nil {
-		return nil, nil
-	}
-	jlPkt := JLRxPacket{RxPacket: *packet}
-	if len(packet.Payload) < 2 {
-		return &jlPkt, fmt.Errorf("sx1231 JeeLabs decode: packet too short: %d bytes",
-			len(packet.Payload))
+// packet format. The outPayload it returns has the src/dst stripped.
+func JLDecode(grp byte, payload []byte) (
+	src, dst byte, ack bool, outPayload []byte, err error,
+) {
+	if len(payload) < 2 {
+		err = fmt.Errorf("sx1231 JeeLabs decode: packet too short: %d bytes",
+			len(payload))
+		return
 	}
 
 	// check group parity bits.
 	p7 := ((grp >> 7) & 1) ^ ((grp >> 5) & 1) ^ ((grp >> 3) & 1) ^ ((grp >> 1) & 1)
 	p6 := ((grp >> 6) & 1) ^ ((grp >> 4) & 1) ^ ((grp >> 2) & 1) ^ ((grp >> 0) & 1)
-	if packet.Payload[0]&0xc0 != (p7<<7)|(p6<<6) {
-		return &jlPkt, fmt.Errorf(
+	if payload[0]&0xc0 != (p7<<7)|(p6<<6) {
+		err = fmt.Errorf(
 			"sx1231 JeeLabs decode: bad group parity: got %#x want %#x for group %d",
-			packet.Payload[0]&0xc0, (p7<<7)|(p6<<6), grp)
+			payload[0]&0xc0, (p7<<7)|(p6<<6), grp)
+		return
 	}
 
-	jlPkt.Dst = packet.Payload[0] & 0x3f
-	jlPkt.Src = packet.Payload[1] & 0x3f
-	jlPkt.Ack = packet.Payload[1]&0x80 != 0
-	jlPkt.Payload = packet.Payload[2:]
-	return &jlPkt, nil
+	dst = payload[0] & 0x3f
+	src = payload[1] & 0x3f
+	ack = payload[1]&0x80 != 0
+	outPayload = payload[2:]
+	return
+}
+
+/* deprecated in favor of mqttradio GW type of structure
+
+// JLRxPacket holds a decoded JeeLabs packet.
+type JLRxPacket struct {
+	Src, Dst byte // source and destination nodes from packet header
+	Ack      bool // ACK request bit from packet header
+	RxPacket
 }
 
 type JLTxPacket struct {
@@ -132,3 +134,5 @@ func JLAckHandler(radio *Radio, grp byte) (chan<- *JLTxPacket, <-chan *JLRxPacke
 	}()
 	return txChan, rxChan
 }
+
+*/
