@@ -75,7 +75,7 @@ var configRegs = []byte{
 	0x1E, 0x0C, // AfcAutoclearOn, AfcAutoOn
 	0x25, DIO_MAPPING, // DioMapping1
 	0x26, 0x07, // disable clkout
-	0x29, 0xB4, // RssiThresh (A0=-80dB, B4=-90dB, B8=-92dB)
+	0x29, 0xA8, // RssiThresh (A0=-80dB, B4=-90dB, B8=-92dB)
 	0x2A, 0x00, // disable RxStart timeout
 	0x2B, 0x40, // RssiTimeout after 2*64=128 bytes
 	0x2D, 0x05, // PreambleSize = 5

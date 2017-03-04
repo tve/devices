@@ -515,7 +515,7 @@ func (r *Radio) worker() {
 					r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)-1)
 					r.log("RSSI threshold raised: %.2f timeout/sec, %.1fdBm",
 						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
-				case timeoutPerSec < 2.5:
+				case timeoutPerSec < 5:
 					r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)+1)
 					r.log("RSSI threshold lowered: %.2f timeout/sec, %.1fdBm",
 						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
@@ -645,9 +645,9 @@ func (r *Radio) intrReceive() {
 		}
 		// Timeout so we don't get stuck here.
 		if time.Now().After(tOut) {
-			r.log("RX timeout! irq1=%#02x irq2=%02x, rssi=%ddBm fei=%dHz", irq1, irq2,
-				0-int(r.readReg(REG_RSSIVALUE))/2,
-				(int(int16(r.readReg16(REG_AFCMSB)))*(32000000>>13))>>6)
+			//r.log("RX timeout! irq1=%#02x irq2=%02x, rssi=%ddBm fei=%dHz", irq1, irq2,
+			//	0-int(r.readReg(REG_RSSIVALUE))/2,
+			//	(int(int16(r.readReg16(REG_AFCMSB)))*(32000000>>13))>>6)
 			r.rxTimeout++
 			// Make sure the FIFO is empty (not sure this is necessary).
 			if irq2&IRQ2_FIFONOTEMPTY != 0 {
