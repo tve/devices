@@ -36,7 +36,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tve/devices"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
 )
 
 const rxChanCap = 4 // queue up to 4 received packets before dropping
@@ -47,12 +48,12 @@ type Radio struct {
 	TxChan chan<- []byte    // channel to transmit packets
 	RxChan <-chan *RxPacket // channel for received packets
 	// configuration
-	spi     devices.SPI  // SPI device to access the radio
-	intrPin devices.GPIO // interrupt pin for RX and TX interrupts
-	intrCnt int          // count interrupts
-	sync    byte         // sync byte
-	freq    uint32       // center frequency in Hz
-	config  string       // entry in Configs table being used
+	spi     spi.Conn   // SPI device to access the radio
+	intrPin gpio.PinIn // interrupt pin for RX and TX interrupts
+	intrCnt int        // count interrupts
+	sync    byte       // sync byte
+	freq    uint32     // center frequency in Hz
+	config  string     // entry in Configs table being used
 	// state
 	sync.Mutex                // guard concurrent access to the radio
 	mode       byte           // current operation mode
@@ -116,7 +117,7 @@ type RxPacket struct {
 // Received packets will be sent on the returned rxChan, which has a small amount of
 // buffering. The rxChan will be closed if a persistent error occurs when
 // communicating with the device, use the Error() function to retrieve the error.
-func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
+func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
 		spi: dev, intrPin: intr,
 		mode: 255,
@@ -131,7 +132,7 @@ func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 	if err := dev.Speed(4 * 1000 * 1000); err != nil {
 		return nil, fmt.Errorf("sx1276: cannot set speed, %v", err)
 	}
-	if err := dev.Configure(devices.SPIMode0, 8); err != nil {
+	if err := dev.Configure(spi.Mode0, 8); err != nil {
 		return nil, fmt.Errorf("sx1276: cannot set mode, %v", err)
 	}
 
@@ -193,7 +194,7 @@ func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 	r.TxChan = r.txChan
 
 	// Initialize interrupt pin.
-	if err := r.intrPin.In(devices.GpioRisingEdge); err != nil {
+	if err := r.intrPin.In(gpio.Float, gpio.RisingEdge); err != nil {
 		return nil, fmt.Errorf("sx1276: error initializing interrupt pin: %s", err)
 	}
 
@@ -209,7 +210,7 @@ func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 		r.logRegs()
 		v := r.intrPin.Read()
 		r.log("Interrupt pin is %v", v)
-		if v == devices.GpioHigh {
+		if v == gpio.High {
 			return nil, fmt.Errorf("sx1276: interrupts from radio do not work, try unexporting gpio%d", r.intrPin.Number())
 		} else {
 			return nil, fmt.Errorf("sx1276: the radio is not generating an interrupt, odd...")
@@ -372,19 +373,19 @@ func (r *Radio) worker() {
 	intrStop := make(chan struct{})
 	go func() {
 		// Make sure we're not missing an initial edge due to a race condition.
-		if r.intrPin.Read() == devices.GpioHigh {
+		if r.intrPin.Read() == gpio.High {
 			intrChan <- time.Now()
 		}
 		for {
 			if r.intrPin.WaitForEdge(time.Second) {
 				// CHIP does BothEdges on the XIO pins, so we get extra intrs
-				if r.intrPin.Read() == devices.GpioHigh {
+				if r.intrPin.Read() == gpio.High {
 					//r.log("interrupt")
 					intrChan <- time.Now()
 				} else {
 					//r.log("end-of-interrupt")
 				}
-			} else if r.intrPin.Read() == devices.GpioHigh {
+			} else if r.intrPin.Read() == gpio.High {
 				r.log("Interrupt was missed!")
 				intrChan <- time.Now()
 			} else {
@@ -431,8 +432,8 @@ func (r *Radio) worker() {
 	// Signal to clients that something is amiss.
 	close(r.rxChan)
 	close(intrStop)
-	r.intrPin.In(devices.GpioNoEdge) // causes interrupt goroutine to exit
-	r.spi.Close()
+	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
+	//r.spi.Close()
 }
 
 // send switches the radio's mode and starts transmitting a packet.

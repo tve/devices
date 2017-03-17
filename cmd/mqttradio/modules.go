@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-
-	_ "github.com/kidoman/embd/host/chip"
 )
 
 // module is a static descriptor for a message/packet processing module. A module

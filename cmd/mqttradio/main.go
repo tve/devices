@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/kidoman/embd"
-	_ "github.com/kidoman/embd/host/chip"
-	"github.com/tve/devices"
 	"github.com/tve/devices/spimux"
 	"github.com/tve/devices/sx1231"
 	"github.com/tve/devices/sx1276"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
+	"periph.io/x/periph/host"
 )
 
 type LogPrintf func(format string, v ...interface{})
@@ -61,22 +61,19 @@ type ModuleConfig struct {
 }
 
 // muxedSPI opens an SPI bus and uses an extra pin to mux it across two radios.
-func muxedSPI(selPinName string) ([]devices.SPI, error) {
-	selPin := devices.NewGPIO(selPinName)
-	// selPin := gpio.ByName(selPinName)
+func muxedSPI(selPinName string) ([]spi.Conn, error) {
+	selPin := gpio.ByName(selPinName)
 	if selPin == nil {
 		return nil, fmt.Errorf("cannot open pin %s", selPinName)
 	}
 
-	spiBus := devices.NewSPI()
-	/* periph
 	spiBus, err := spi.New(-1, 0)
 	if err != nil {
-		return err
-	} */
+		return nil, err
+	}
 
 	radio0, radio1 := spimux.New(spiBus, selPin)
-	return []devices.SPI{radio0, radio1}, nil
+	return []spi.Conn{radio0, radio1}, nil
 }
 
 func main() {
@@ -138,20 +135,17 @@ func main() {
 	}
 
 	log.Printf("Configuring radio(s)")
-	embd.InitGPIO()
-	embd.InitSPI()
-	/* periph
-	_, err := host.Init()
-	if err != nil {
-		return err
-	}*/
+	if _, err = host.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to init I/O: %s", err)
+		os.Exit(2)
+	}
 
 	// Configure Radios.
 	//
 	// We keep a map of unused muxed SPI devices. Basically when the first radio uses a
 	// muxed SPI chip select the remainder is entered here so the other radio gets it from
 	// here.
-	muxes := map[string]devices.SPI{}
+	muxes := map[string]spi.Conn{}
 	for _, r := range config.Radio {
 		if err := startRadio(r, muxes, mq, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to config radio for %s: %s", r.Prefix, err)

@@ -8,11 +8,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/periph/conn/gpio"
-	"github.com/google/periph/conn/spi"
-	"github.com/google/periph/host"
 	"github.com/tve/devices/spimux"
 	"github.com/tve/devices/sx1276"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
+	"periph.io/x/periph/host"
 )
 
 func panicIf(err error) {
@@ -25,8 +25,7 @@ func main() {
 	_, err := host.Init()
 	panicIf(err)
 
-	//intrPinName := "EINT17"
-	intrPinName := "XIO-P1"
+	intrPinName := "EINT17"
 	intrPin := gpio.ByName(intrPinName)
 	if intrPin == nil {
 		panic("Cannot open pin " + intrPinName)

@@ -9,43 +9,32 @@ import (
 	"os"
 	"time"
 
-	//"github.com/google/periph/conn/gpio"
-	//"github.com/google/periph/conn/spi"
-	//"github.com/google/periph/host"
-	"github.com/kidoman/embd"
-	_ "github.com/kidoman/embd/host/chip"
-	"github.com/tve/devices"
 	"github.com/tve/devices/spimux"
 	rfm69 "github.com/tve/devices/sx1231"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
+	"periph.io/x/periph/host"
 )
 
 func run(intrPinName, csPinName string, csVal, power int, debug bool) error {
-	embd.InitGPIO()
-	embd.InitSPI()
-	/* periph
-	_, err := host.Init()
-	if err != nil {
+	if _, err := host.Init(); err != nil {
 		return err
-	}*/
+	}
 
-	// intrPin := gpio.ByName(intrPinName)
-	intrPin := devices.NewGPIO(intrPinName)
+	intrPin := gpio.ByName(intrPinName)
 	if intrPin == nil {
 		return fmt.Errorf("cannot open pin %s", intrPinName)
 	}
 
-	// selPin := gpio.ByName(csPinName)
-	selPin := devices.NewGPIO(csPinName)
+	selPin := gpio.ByName(csPinName)
 	if selPin == nil {
 		return fmt.Errorf("cannot open pin %s", csPinName)
 	}
 
-	/* periph
 	spiBus, err := spi.New(-1, 0)
 	if err != nil {
 		return err
-	} */
-	spiBus := devices.NewSPI()
+	}
 
 	spi1231, b := spimux.New(spiBus, selPin)
 	if csVal != 0 {
@@ -93,12 +82,8 @@ func run(intrPinName, csPinName string, csVal, power int, debug bool) error {
 
 		log.Printf("Receiving packets ...")
 		for pkt := range rxChan {
-			crc := "bad"
-			if pkt.CrcOK {
-				crc = "OK"
-			}
-			log.Printf("Got len=%d crc=%s rssi=%ddB fei=%dHz %q",
-				len(pkt.Payload), crc, pkt.Rssi, pkt.Fei, string(pkt.Payload))
+			log.Printf("Got len=%d rssi=%ddB fei=%dHz %q",
+				len(pkt.Payload), pkt.Rssi, pkt.Fei, string(pkt.Payload))
 		}
 	}
 	return nil

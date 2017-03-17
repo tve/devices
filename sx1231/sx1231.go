@@ -42,8 +42,8 @@ import (
 	"sync"
 	"time"
 
-	//"github.com/kidoman/embd"
-	"github.com/tve/devices"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
 )
 
 const rxChanCap = 4 // queue up to 4 received packets before dropping
@@ -54,14 +54,14 @@ type Radio struct {
 	TxChan chan<- []byte    // channel to transmit packets
 	RxChan <-chan *RxPacket // channel for received packets
 	// configuration
-	spi     devices.SPI  // SPI device to access the radio
-	intrPin devices.GPIO // interrupt pin for RX and TX interrupts
-	intrCnt int          // count interrupts
-	sync    []byte       // sync bytes
-	freq    uint32       // center frequency
-	rate    uint32       // bit rate from table
-	paBoost bool         // true: use PA1+PA2 power amp, else PA0
-	power   byte         // output power in dBm
+	spi     spi.Conn   // SPI device to access the radio
+	intrPin gpio.PinIn // interrupt pin for RX and TX interrupts
+	intrCnt int        // count interrupts
+	sync    []byte     // sync bytes
+	freq    uint32     // center frequency
+	rate    uint32     // bit rate from table
+	paBoost bool       // true: use PA1+PA2 power amp, else PA0
+	power   byte       // output power in dBm
 	// state
 	sync.Mutex                // guard concurrent access to the radio
 	mode       byte           // current operation mode
@@ -144,7 +144,7 @@ type RxPacket struct {
 // Received packets will be sent on the returned rxChan, which has a small amount of
 // buffering. The rxChan will be closed if a persistent error occurs when
 // communicating with the device, use the Error() function to retrieve the error.
-func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
+func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
 		spi: dev, intrPin: intr,
 		mode:    255,
@@ -162,7 +162,7 @@ func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 	if err := dev.Speed(4 * 1000 * 1000); err != nil {
 		return nil, fmt.Errorf("sx1231: cannot set speed, %v", err)
 	}
-	if err := dev.Configure(devices.SPIMode0, 8); err != nil {
+	if err := dev.Configure(spi.Mode0, 8); err != nil {
 		return nil, fmt.Errorf("sx1231: cannot set mode, %v", err)
 	}
 
@@ -240,7 +240,7 @@ func New(dev devices.SPI, intr devices.GPIO, opts RadioOpts) (*Radio, error) {
 	count := 0
 repeat:
 	// Initialize interrupt pin.
-	if err := r.intrPin.In(devices.GpioRisingEdge); err != nil {
+	if err := r.intrPin.In(gpio.Float, gpio.RisingEdge); err != nil {
 		return nil, fmt.Errorf("sx1231: error initializing interrupt pin: %s", err)
 	}
 	r.log("Interrupt pin is %v", r.intrPin.Read())
@@ -256,7 +256,7 @@ repeat:
 	if !r.intrPin.WaitForEdge(100 * time.Millisecond) {
 		if count == 0 {
 			r.writeReg(REG_DIOMAPPING1, DIO_MAPPING)
-			r.intrPin.Close()
+			//r.intrPin.Close()
 			time.Sleep(100 * time.Millisecond)
 			count++
 			goto repeat
@@ -470,7 +470,7 @@ func (r *Radio) worker() {
 	intrStop := make(chan struct{})
 	go func() {
 		// Make sure we're not missing an initial edge due to a race condition.
-		if r.intrPin.Read() == devices.GpioHigh {
+		if r.intrPin.Read() == gpio.High {
 			intrChan <- struct{}{}
 		}
 		// Start RSSI adjustment.
@@ -480,10 +480,10 @@ func (r *Radio) worker() {
 		for {
 			if r.intrPin.WaitForEdge(10 * time.Second) {
 				//r.log("interrupt %d", r.intrPin.Read())
-				if r.intrPin.Read() == 1 {
+				if r.intrPin.Read() == gpio.High {
 					intrChan <- struct{}{}
 				}
-			} else if r.intrPin.Read() == devices.GpioHigh {
+			} else if r.intrPin.Read() == gpio.High {
 				// Sometimes WaitForEdge times out yet the interrupt pin is
 				// active, this means the driver or epoll failed us.
 				// Need to understand this better.
@@ -557,8 +557,8 @@ func (r *Radio) worker() {
 	// Signal to clients that something is amiss.
 	close(r.rxChan)
 	close(intrStop)
-	r.intrPin.In(devices.GpioNoEdge) // causes interrupt goroutine to exit
-	r.spi.Close()
+	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
+	//r.spi.Close()
 }
 
 // send switches the radio's mode and starts transmitting a packet.

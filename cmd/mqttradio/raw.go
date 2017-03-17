@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	_ "github.com/kidoman/embd/host/chip"
-	"github.com/tve/devices"
 	"github.com/tve/devices/sx1231"
 	"github.com/tve/devices/sx1276"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
 )
 
 // RawRxPacket is the structure published to MQTT for raw packets received on a radio.
@@ -45,20 +45,21 @@ type RawTxMessage struct {
 
 // startRadio prepares all the devices, pins, and MQTT channels needed to operate a radio
 // and then calls the radio type specific function to start the gatewaying goroutines.
-func startRadio(r RadioConfig, muxes map[string]devices.SPI, mq *mq, debug LogPrintf) error {
+func startRadio(r RadioConfig, muxes map[string]spi.Conn, mq *mq, debug LogPrintf) error {
 	if debug != nil {
 		debug("Configuring radio for %s: %+v", r.Prefix, r)
 	}
 
 	// First step is to get a handle onto the SPI device. Need to deal with muxed
 	// devices, though.
-	if r.SpiBus != 0 || r.SpiCS != 0 {
-		return fmt.Errorf("Sorry, only SPI bus 0, chip select 0 supported")
-	}
-	var dev devices.SPI
+	var dev spi.Conn
+	var err error
 	if r.CSMuxPin == "" {
 		// Easy case: non-muxed SPI bus.
-		dev = devices.NewSPI()
+		dev, err = spi.New(r.SpiBus, r.SpiCS)
+		if err != nil {
+			return err
+		}
 	} else {
 		// More complex: SPI bus with muxed chip select.
 		// muxKey indexes into the muxes hash to locate existing SPI mux devices.
@@ -93,8 +94,7 @@ func startRadio(r RadioConfig, muxes map[string]devices.SPI, mq *mq, debug LogPr
 	rxPub := func(pkt *RawRxPacket) { mq.Publish(r.Prefix+"/rx", pkt) }
 
 	// Open the interrupt pin.
-	intrPin := devices.NewGPIO(r.IntrPin)
-	// intrPin := gpio.ByName(intrPinName)
+	intrPin := gpio.ByName(r.IntrPin)
 	if intrPin == nil {
 		return fmt.Errorf("cannot open pin %s", r.IntrPin)
 	}
@@ -128,12 +128,12 @@ func startRadio(r RadioConfig, muxes map[string]devices.SPI, mq *mq, debug LogPr
 
 // radioSettings contains the settings of a radio.
 type radioSettings struct {
-	dev     devices.SPI  // radio device interface
-	intrPin devices.GPIO // interrupt pin
-	freq    uint32       // center frequency
-	rate    string       // name for modulation/data-rate setting
-	sync    []byte       // sync bytes
-	power   int          // output power in dBm
+	dev     spi.Conn   // radio device interface
+	intrPin gpio.PinIn // interrupt pin
+	freq    uint32     // center frequency
+	rate    string     // name for modulation/data-rate setting
+	sync    []byte     // sync bytes
+	power   int        // output power in dBm
 }
 
 // lora1276GW instantiates an sx1276 radio in LoRa mode, and then gateways

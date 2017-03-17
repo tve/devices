@@ -5,32 +5,9 @@ package spimux
 import (
 	"sync"
 
-	"github.com/tve/devices"
+	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/spi"
 )
-
-type Conn struct {
-	mu          *sync.Mutex  // prevent concurrent access to shared SPI bus
-	devices.SPI              // the underlying SPI bus with shared chip select
-	selPin      devices.GPIO // pin to select between two devices
-	sel         int          // select value for this device
-}
-
-func New(spi devices.SPI, selPin devices.GPIO) (devices.SPI, devices.SPI) {
-	mu := sync.Mutex{}
-	return &Conn{&mu, spi, selPin, 0}, &Conn{&mu, spi, selPin, 1}
-}
-
-func (c *Conn) Tx(w, r []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.selPin.Out(c.sel)
-	return c.SPI.Tx(w, r)
-}
-
-func (c *Conn) Close() error { return nil }
-
-/* periph...
 
 // Conn represents a connection to a device on an SPI bus with a multiplexed chip select.
 //
@@ -81,5 +58,3 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 // Close is a no-op. TODO: close once both spimux are closed.
 func (c *Conn) Close() error { return nil }
-
-*/
