@@ -23,8 +23,8 @@ package max31855
 import (
 	"fmt"
 
-	"github.com/google/periph/conn/spi"
-	"github.com/google/periph/devices"
+	"periph.io/x/periph/conn/spi"
+	"periph.io/x/periph/devices"
 )
 
 // Dev represents a MAX31855 device.
