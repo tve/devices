@@ -45,19 +45,25 @@ func run(intrPinName, csPinName string, csVal, power int, debug bool) error {
 	t0 := time.Now()
 	rfm69, err := rfm69.New(spi1231, intrPin, rfm69.RadioOpts{
 		Sync:   []byte{0x2D, 0x06},
-		Freq:   915750000,
+		Freq:   912500000,
 		Rate:   49230,
 		Logger: log.Printf,
 	})
 	if err != nil {
 		return err
 	}
-	rxChan, txChan := rfm69.RxChan, rfm69.TxChan
 	log.Printf("Ready (%.1fms)", time.Since(t0).Seconds()*1000)
 
 	if len(os.Args) > 1 && os.Args[1] == "tx" {
 
-		for i := 1; i <= 2; i++ {
+		// need a receiving goroutine to keep things moving...
+		go func() {
+			for {
+				rfm69.Receive()
+			}
+		}()
+
+		for i := 1; i <= 20; i++ {
 			log.Printf("Sending packet %d ...", i)
 			t0 = time.Now()
 			if i&1 == 0 {
@@ -66,13 +72,11 @@ func run(intrPinName, csPinName string, csVal, power int, debug bool) error {
 				rfm69.SetPower(0x1F)
 			}
 			//msg := "\x01Hello there, these are 60 chars............................"
-			msg := fmt.Sprintf("\x01Hello %03d", i)
-			txChan <- []byte(msg)
-			log.Printf("Sent in %.1fms", time.Since(t0).Seconds()*1000)
-			time.Sleep(100 * time.Millisecond)
-			if rfm69.Error() != nil {
-				return rfm69.Error()
+			msg := []byte(fmt.Sprintf("\x01Hello %03d", i))
+			if err := rfm69.Transmit(msg); err != nil {
+				return err
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		time.Sleep(100 * time.Millisecond)
@@ -81,7 +85,11 @@ func run(intrPinName, csPinName string, csVal, power int, debug bool) error {
 	} else {
 
 		log.Printf("Receiving packets ...")
-		for pkt := range rxChan {
+		for {
+			pkt, err := rfm69.Receive()
+			if err != nil {
+				return err
+			}
 			log.Printf("Got len=%d rssi=%ddB fei=%dHz %q",
 				len(pkt.Payload), pkt.Rssi, pkt.Fei, string(pkt.Payload))
 		}

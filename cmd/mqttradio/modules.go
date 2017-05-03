@@ -17,11 +17,11 @@ import (
 //
 // The runner gets called using reflection in order to allow its definition to be
 // strongly typed to the messages received. For this to work, its first argument needs
-// to be a channel of a struct that has a Topic string field and a Payload struct field.
+// to be a pointer to a struct that has a Topic string field and a Payload struct field.
 // The Payload struct field can then describe the payload.
 type module struct {
 	name   string      // name of the module, needs to be used in the config
-	runner interface{} // func(sub <-chan subChanType, pub pubFunc, debug LogPrintf)
+	runner interface{} // func(m *msgType, pub pubFunc, debug LogPrintf)
 }
 
 // pubFunc is the publishing function passed into a runner.
@@ -46,31 +46,31 @@ func hookModule(mc ModuleConfig, mq *mq, debug LogPrintf) error {
 		return fmt.Errorf("module %s not found", m)
 	}
 
-	// Derive the type of the subscription channel. This will panic if the runner doesn't have
+	// Derive the type of the subscription message. This will panic if the runner doesn't have
 	// an appropriate type, which is OK for now.
 	runner := reflect.ValueOf(m.runner)
 	runnerType := runner.Type()
 	if runnerType.Kind() != reflect.Func || runnerType.NumIn() != 3 {
 		return errors.New("module runner is not a function with 3 arguments")
 	}
-	subChanType := runnerType.In(0)
-	if subChanType.Kind() != reflect.Chan {
-		return errors.New("first arg of module runner is not a channel")
+	msgType := runnerType.In(0)
+	if msgType.Kind() != reflect.Ptr || msgType.Elem().Kind() != reflect.Struct {
+		return errors.New("first arg of module runner is not a pointer to a struct")
 	}
 
-	// Create the subscription channel with the appropriate concrete type. Then use it to
-	// subscribe.
-	subChan := reflect.MakeChan(subChanType, 10)
-	if err := mq.Subscribe(mc.Sub, subChan.Interface()); err != nil {
-		return err
-	}
-
-	// Now start the runner goroutine, passing it an appropriate publication function.
+	// Create a publish function.
 	pubFun := func(topicSuffix string, payload interface{}) {
 		mq.Publish(mc.Pub+topicSuffix, payload)
 	}
-	go func() {
-		runner.Call([]reflect.Value{subChan, reflect.ValueOf(pubFun), reflect.ValueOf(debug)})
-	}()
-	return nil
+
+	// Create subscription function.
+	subFuncType := reflect.FuncOf([]reflect.Type{msgType}, nil, false)
+	subFunc := reflect.MakeFunc(subFuncType, func(args []reflect.Value) []reflect.Value {
+		runner.Call([]reflect.Value{args[0], reflect.ValueOf(pubFun), reflect.ValueOf(debug)})
+		return nil
+	})
+
+	// Create the subscription.
+	err := mq.Subscribe(mc.Sub, subFunc.Interface())
+	return err
 }

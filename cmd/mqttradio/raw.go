@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/tve/devices/sx1231"
-	"github.com/tve/devices/sx1276"
+	"github.com/tve/devices/thread"
 	"periph.io/x/periph/conn/gpio"
 	"periph.io/x/periph/conn/spi"
 )
@@ -84,12 +84,6 @@ func startRadio(r RadioConfig, muxes map[string]spi.Conn, mq *mq, debug LogPrint
 		}
 	}
 
-	// Create MQTT subscription for Tx.
-	txChan := make(chan RawTxMessage, 10)
-	if err := mq.Subscribe(r.Prefix+"/tx", txChan); err != nil {
-		return err
-	}
-
 	// Create MQTT publisher with prefix for rx.
 	rxPub := func(pkt *RawRxPacket) { mq.Publish(r.Prefix+"/rx", pkt) }
 
@@ -113,16 +107,26 @@ func startRadio(r RadioConfig, muxes map[string]spi.Conn, mq *mq, debug LogPrint
 	rs := &radioSettings{dev: dev, intrPin: intrPin, freq: uint32(r.Freq),
 		rate: r.Rate, sync: sync, power: r.Power}
 
+	var txFunc func(*RawTxMessage)
 	switch r.Type {
 	case "lora.sx1276":
-		err = lora1276GW(rs, r.Prefix, txChan, rxPub, debug)
+		txFunc, err = lora1276GW(rs, r.Prefix, rxPub, debug)
 	case "fsk.rfm69":
-		err = fsk69GW(rs, false, r.Prefix, txChan, rxPub, debug)
+		txFunc, err = fsk69GW(rs, false, r.Prefix, rxPub, debug)
 	case "fsk.rfm69h":
-		err = fsk69GW(rs, true, r.Prefix, txChan, rxPub, debug)
+		txFunc, err = fsk69GW(rs, true, r.Prefix, rxPub, debug)
 	default:
 		err = fmt.Errorf("unknown radio type: %s", r.Type)
 	}
+	if err != nil {
+		return err
+	}
+
+	// Create MQTT subscription for Tx.
+	if err := mq.Subscribe(r.Prefix+"/tx", txFunc); err != nil {
+		return err
+	}
+
 	return err
 }
 
@@ -138,51 +142,55 @@ type radioSettings struct {
 
 // lora1276GW instantiates an sx1276 radio in LoRa mode, and then gateways
 // between the radio and mqtt.
-func lora1276GW(conf *radioSettings, prefix string, txChan <-chan RawTxMessage,
+func lora1276GW(conf *radioSettings, prefix string,
 	rxPub func(*RawRxPacket), debug LogPrintf,
-) error {
+) (func(*RawTxMessage), error) {
+	return nil, nil
+	/*
 
-	log.Printf("Initializing LoRA sx1276 radio for %s", prefix)
-	radio, err := sx1276.New(conf.dev, conf.intrPin, sx1276.RadioOpts{
-		Sync:   conf.sync[0],
-		Freq:   conf.freq,
-		Config: conf.rate,
-		Logger: sx1276.LogPrintf(debug),
-	})
-	if err != nil {
-		return err
-	}
-	radio.SetPower(byte(conf.power))
-	log.Printf("LoRa radio ready")
-
-	// Radio -> MQTT goroutine.
-	go func() {
-		for pkt := range radio.RxChan {
-			rxPub(&RawRxPacket{Packet: pkt.Payload, Rssi: pkt.Rssi, Fei: pkt.Fei, At: pkt.At})
+		log.Printf("Initializing LoRA sx1276 radio for %s", prefix)
+		radio, err := sx1276.New(conf.dev, conf.intrPin, sx1276.RadioOpts{
+			Sync:   conf.sync[0],
+			Freq:   conf.freq,
+			Config: conf.rate,
+			Logger: sx1276.LogPrintf(debug),
+		})
+		if err != nil {
+			return err
 		}
-		log.Printf("%s: radio->mqtt goroutine exiting", prefix)
-	}()
+		radio.SetPower(byte(conf.power))
+		log.Printf("LoRa radio ready")
 
-	// MQTT -> Radio goroutine
-	go func() {
-		for pkt := range txChan {
-			radio.TxChan <- pkt.Payload.Packet
-		}
-		log.Printf("%s: mqtt->radio goroutine exiting", prefix)
-	}()
-	return nil
+		// Radio -> MQTT goroutine.
+		go func() {
+			for pkt := range radio.RxChan {
+				rxPub(&RawRxPacket{Packet: pkt.Payload, Rssi: pkt.Rssi, Snr: pkt.Snr,
+					Fei: pkt.Fei, At: pkt.At})
+			}
+			log.Printf("%s: radio->mqtt goroutine exiting", prefix)
+		}()
+
+		// MQTT -> Radio goroutine
+		go func() {
+			for pkt := range txChan {
+				radio.TxChan <- pkt.Payload.Packet
+			}
+			log.Printf("%s: mqtt->radio goroutine exiting", prefix)
+		}()
+		return nil
+	*/
 }
 
 // fsk69GW instantiates an sx1231 radio, and then gateways between the radio and mqtt.
 // If paBoost is true then power amplifiers PA1 and PA2 are used, else PA0 is used.
-func fsk69GW(conf *radioSettings, paBoost bool, prefix string, txChan <-chan RawTxMessage,
+func fsk69GW(conf *radioSettings, paBoost bool, prefix string,
 	rxPub func(*RawRxPacket), debug LogPrintf,
-) error {
+) (func(*RawTxMessage), error) {
 
 	log.Printf("Initializing FSK sx1231 radio for %s", prefix)
 	rate, err := strconv.ParseUint(conf.rate, 0, 32)
 	if err != nil {
-		return fmt.Errorf("cannot parse data rate %s: %s", conf.rate, err)
+		return nil, fmt.Errorf("cannot parse data rate %s: %s", conf.rate, err)
 	}
 
 	radio, err := sx1231.New(conf.dev, conf.intrPin, sx1231.RadioOpts{
@@ -193,30 +201,48 @@ func fsk69GW(conf *radioSettings, paBoost bool, prefix string, txChan <-chan Raw
 		Logger:  sx1231.LogPrintf(debug),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	radio.SetPower(byte(conf.power))
 	log.Printf("FSK radio ready")
 
 	// Radio -> MQTT goroutine.
 	go func() {
-		for pkt := range radio.RxChan {
+		if err := thread.Realtime(); err != nil {
+			log.Printf("%s: cannot make radio goroutine realtime: %s", prefix, err)
+		}
+		for {
+			pkt, err := radio.Receive()
+			if err != nil {
+				log.Printf("%s: receive error: %s", prefix, err)
+				continue
+			}
 			log.Printf("%s: RX %ddBm %dHz %db: %#x",
 				prefix, pkt.Rssi, pkt.Fei, len(pkt.Payload), pkt.Payload)
-			rxPub(&RawRxPacket{Packet: pkt.Payload, Rssi: pkt.Rssi, Fei: pkt.Fei, At: pkt.At})
+			rxPub(&RawRxPacket{Packet: pkt.Payload, Rssi: pkt.Rssi, Snr: pkt.Snr,
+				Fei: pkt.Fei, At: pkt.At})
 		}
 		log.Printf("%s: radio->mqtt goroutine exiting", prefix)
 	}()
 
-	// MQTT -> Radio goroutine
-	go func() {
-		for pkt := range txChan {
-			buf := pkt.Payload.Packet
-			log.Printf("%s: TX %db: %#x", prefix, len(buf), buf)
-			radio.TxChan <- buf
+	// MQTT -> Radio function
+	txFunc := func(m *RawTxMessage) {
+		buf := m.Payload.Packet
+		log.Printf("%s: TX %db: %#x", prefix, len(buf), buf)
+		// Retry loop while radio is busy.
+		for {
+			err := radio.Transmit(buf)
+			if err == nil {
+				return
+			}
+			if _, ok := err.(sx1231.Temporary); !ok {
+				log.Printf("%s: TX failed due to %s", prefix, err)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		log.Printf("%s: mqtt->radio goroutine exiting", prefix)
-	}()
+		return
+	}
 
-	return nil
+	return txFunc, nil
 }

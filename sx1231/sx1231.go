@@ -46,13 +46,8 @@ import (
 	"periph.io/x/periph/conn/spi"
 )
 
-const rxChanCap = 4 // queue up to 4 received packets before dropping
-const txChanCap = 4 // queue up to 4 packets to tx before blocking
-
 // Radio represents a Semtech SX1231 radio as used in HopeRF's RFM69 modules.
 type Radio struct {
-	TxChan chan<- []byte    // channel to transmit packets
-	RxChan <-chan *RxPacket // channel for received packets
 	// configuration
 	spi     spi.Conn   // SPI device to access the radio
 	intrPin gpio.PinIn // interrupt pin for RX and TX interrupts
@@ -63,13 +58,11 @@ type Radio struct {
 	paBoost bool       // true: use PA1+PA2 power amp, else PA0
 	power   byte       // output power in dBm
 	// state
-	sync.Mutex                // guard concurrent access to the radio
-	mode       byte           // current operation mode
-	rxTimeout  uint32         // RX timeout counter to tune rssi threshold
-	err        error          // persistent error
-	rxChan     chan *RxPacket // channel to push recevied packets into
-	txChan     chan []byte    // channel for packets to be transmitted
-	log        LogPrintf      // function to use for logging
+	sync.Mutex           // guard concurrent access to the radio
+	mode       byte      // current operation mode
+	rxTimeout  uint32    // RX timeout counter to tune rssi threshold
+	rssiAdj    time.Time // when the rssi threshold was last adjusted
+	log        LogPrintf // function to use for logging
 }
 
 // RadioOpts contains options used when initilizing a Radio.
@@ -127,9 +120,22 @@ var Rates = map[uint32]Rate{
 type RxPacket struct {
 	Payload []byte    // payload, from address to last data byte, excluding length & crc
 	Rssi    int       // rssi value for current packet
+	Snr     int       // rssi - noise floor for current packet
 	Fei     int       // frequency error for current packet
 	At      time.Time // time of rx interrupt
 }
+
+// Temporary is an interface implemented by errors that are temporary and thus worth retrying.
+type Temporary interface {
+	Temporary() bool
+}
+
+type busyError struct{ e string }
+
+func (b busyError) Error() string   { return b.e }
+func (b busyError) Temporary() bool { return true }
+
+var debugPin gpio.PinOut
 
 // New initializes an sx1231 Radio given an spi.Conn and an interrupt pin, and places the radio
 // in receive mode.
@@ -149,7 +155,6 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 		spi: dev, intrPin: intr,
 		mode:    255,
 		paBoost: opts.PABoost,
-		err:     fmt.Errorf("sx1231 is not initialized"),
 		log:     func(format string, v ...interface{}) {},
 	}
 	if opts.Logger != nil {
@@ -168,6 +173,7 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 
 	// Try to synchronize communication with the sx1231.
 	sync := func(pattern byte) error {
+		var v byte
 		for n := 10; n > 0; n-- {
 			// Doing write transactions explicitly to get OS errors.
 			r.writeReg(REG_SYNCVALUE1, pattern)
@@ -175,12 +181,12 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 				return fmt.Errorf("sx1231: %s", err)
 			}
 			// Read same thing back, we hope...
-			v := r.readReg(REG_SYNCVALUE1)
+			v = r.readReg(REG_SYNCVALUE1)
 			if v == pattern {
 				return nil
 			}
 		}
-		return errors.New("sx1231: cannot sync with chip")
+		return fmt.Errorf("sx1231: cannot sync with chip, sent %#x got %#x", pattern, v)
 	}
 	if err := sync(0xaa); err != nil {
 		return nil, err
@@ -191,10 +197,6 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 
 	r.setMode(MODE_SLEEP)
 	r.setMode(MODE_STANDBY)
-
-	//embd.SetDirection("CSID1", embd.Out) // extra gpio used for debugging
-	//embd.DigitalWrite("CSID1", 1)
-	//embd.DigitalWrite("CSID1", 0)
 
 	// Detect chip version.
 	r.log("SX1231/SX1231 version %#x", r.readReg(REG_VERSION))
@@ -230,12 +232,11 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	copy(wBuf[2:], r.sync)
 	r.spi.Tx(wBuf, rBuf)
 
-	// Allocate channels for packets, give them some buffer but the reality is that
-	// packets don't come in that fast either...
-	r.rxChan = make(chan *RxPacket, rxChanCap)
-	r.txChan = make(chan []byte, txChanCap)
-	r.RxChan = r.rxChan
-	r.TxChan = r.txChan
+	debugPin = gpio.ByName("CSID1")
+	if debugPin == nil {
+		r.log("Cannot find debug pin")
+	}
+	debugPin.Out(gpio.High)
 
 	count := 0
 repeat:
@@ -272,8 +273,6 @@ repeat:
 	r.logRegs()
 
 	// Finally turn on the receiver.
-	go r.worker()
-	r.err = nil // can get an interrupt anytime now...
 	r.setMode(MODE_RECEIVE)
 
 	return r, nil
@@ -283,6 +282,9 @@ repeat:
 // frequency can be specified at any scale (hz, khz, mhz). The frequency value is not checked
 // and invalid values will simply cause the radio not to work particularly well.
 func (r *Radio) SetFrequency(freq uint32) {
+	r.Lock()
+	defer r.Unlock()
+
 	// accept any frequency scale as input, including KHz and MHz
 	// multiply by 10 until freq >= 100 MHz
 	for freq > 0 && freq < 100000000 {
@@ -318,6 +320,9 @@ func (r *Radio) SetRate(rate uint32) {
 		params.Fdev, bw(params.RxBw), params.RxBw, bw(params.AfcBw), params.AfcBw,
 		(params.Fdev/10/488)*488)
 
+	r.Lock()
+	defer r.Unlock()
+
 	r.rate = rate
 	mode := r.mode
 	r.setMode(MODE_STANDBY)
@@ -343,6 +348,9 @@ func (r *Radio) SetRate(rate uint32) {
 
 // SetPower configures the radio for the specified output power (TODO: should be in dBm).
 func (r *Radio) SetPower(dbm byte) {
+	r.Lock()
+	defer r.Unlock()
+
 	// Save current mode.
 	mode := r.mode
 	r.setMode(MODE_STANDBY)
@@ -381,18 +389,6 @@ func (r *Radio) SetPower(dbm byte) {
 
 // LogPrintf is a function used by the driver to print logging info.
 type LogPrintf func(format string, v ...interface{})
-
-// SetLogger sets a logging function, nil may be used to disable logging, which is the default.
-func (r *Radio) SetLogger(l LogPrintf) {
-	if l != nil {
-		r.log = l
-	} else {
-		r.log = func(format string, v ...interface{}) {}
-	}
-}
-
-// Error returns any persistent error that may have been encountered.
-func (r *Radio) Error() error { return r.err }
 
 //
 
@@ -446,129 +442,111 @@ func (r *Radio) setMode(mode byte) {
 			return
 		}
 	}
-	r.err = errors.New("sx1231: timeout switching modes")
+	//r.err = errors.New("sx1231: timeout switching modes")
 }
 
-// receiving checks whether a reception is currently in progress. It uses the sync match flag as
-// earliest indication that something is coming in that is not noise. It also protects from a
-// packet sitting in RX that hasn't been picked-up yet by the interrupt handler.
-func (r *Radio) receiving() bool {
-	// Can't be receiving if we're not in the right mode...
-	if r.mode != MODE_RECEIVE {
+// busy checks whether a transmission or a reception is currently in progress.
+// For rx it uses the sync match flag as earliest indication that something is coming
+// in that is not noise. It also protects from a packet sitting in RX that hasn't been
+// picked-up yet by the interrupt handler.
+func (r *Radio) busy() bool {
+	switch {
+	case r.mode == MODE_TRANSMIT:
+		return true
+	case r.mode == MODE_RECEIVE:
+		irq1 := r.readReg(REG_IRQFLAGS1)
+		return irq1&IRQ1_SYNCMATCH != 0
+	default:
 		return false
 	}
-	irq1 := r.readReg(REG_IRQFLAGS1)
-	return irq1&IRQ1_SYNCMATCH != 0
 }
 
-// worker is an endless loop that processes interrupts for reception as well as packets
-// enqueued for transmit.
-func (r *Radio) worker() {
-	// Interrupt goroutine converting WaitForEdge to a channel. We need a channel so we can
-	// select between Rx and Tx.
-	intrChan := make(chan struct{})
-	intrStop := make(chan struct{})
-	go func() {
-		// Make sure we're not missing an initial edge due to a race condition.
-		if r.intrPin.Read() == gpio.High {
-			intrChan <- struct{}{}
-		}
-		// Start RSSI adjustment.
+func (r *Radio) Receive() (*RxPacket, error) {
+	// If we haven't yet, start the timer for RSSI threshold adjustments.
+	if r.rssiAdj.IsZero() {
 		r.rxTimeout = 0
-		t0 := time.Now()
-		// Loop over interrupts.
-		for {
-			if r.intrPin.WaitForEdge(10 * time.Second) {
-				//r.log("interrupt %d", r.intrPin.Read())
-				if r.intrPin.Read() == gpio.High {
-					intrChan <- struct{}{}
+		r.rssiAdj = time.Now()
+	}
+
+	r.Lock()
+	defer r.Unlock()
+
+	// Loop over interrupts & timeouts.
+	// Make sure we're not missing an initial edge due to a race condition.
+	intr := r.intrPin.Read() == gpio.High
+	for {
+		if !intr {
+			r.Unlock()
+			intr = r.intrPin.WaitForEdge(1 * time.Second)
+			r.Lock()
+		}
+
+		if !intr && r.intrPin.Read() == gpio.High {
+			// Sometimes WaitForEdge times out yet the interrupt pin is
+			// active, this means the driver or epoll failed us.
+			// Need to understand this better.
+			r.log("Interrupt was missed!")
+		}
+		intr = false
+
+		if r.intrPin.Read() == gpio.High {
+			switch {
+			case r.mode == MODE_RECEIVE:
+				pkt, err := r.rx()
+				r.setMode(MODE_RECEIVE)
+				if pkt != nil || err != nil {
+					return pkt, err
 				}
-			} else if r.intrPin.Read() == gpio.High {
-				// Sometimes WaitForEdge times out yet the interrupt pin is
-				// active, this means the driver or epoll failed us.
-				// Need to understand this better.
-				r.log("Interrupt was missed!")
-				intrChan <- struct{}{}
-			} else {
-				select {
-				case <-intrStop:
-					r.log("rx interrupt goroutine exiting")
-					return
-				default:
-				}
-				// If we're in RX mode and the chip shows a timeout, then reset it.
-				// This shouldn't happen but is here as a safety catch.
-				if r.mode == MODE_RECEIVE && r.readReg(REG_IRQFLAGS1)&IRQ1_TIMEOUT != 0 {
-					r.log("Rx restart")
-					r.log("Mode: %#x, mapping: %#x, IRQ flags: %#x %#x",
-						r.readReg(REG_OPMODE), r.readReg(REG_DIOMAPPING1),
-						r.readReg(REG_IRQFLAGS1), r.readReg(REG_IRQFLAGS2))
-					r.setMode(MODE_FS)
-					r.setMode(MODE_RECEIVE)
-				}
-			}
-			// Adjust RSSI threshold
-			if dt := time.Since(t0); dt > 10*time.Second {
-				timeoutPerSec := float64(r.rxTimeout) / dt.Seconds()
-				switch {
-				case timeoutPerSec > 10:
-					r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)-1)
-					r.log("RSSI threshold raised: %.2f timeout/sec, %.1fdBm",
-						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
-				case timeoutPerSec < 5:
-					r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)+1)
-					r.log("RSSI threshold lowered: %.2f timeout/sec, %.1fdBm",
-						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
-				}
-				r.rxTimeout = 0
-				t0 = time.Now()
+			case r.mode == MODE_TRANSMIT:
+				r.txDone()
+			default:
+				r.setMode(MODE_RECEIVE) // clears intr
 			}
 		}
-	}()
 
-	// Main worker loop selecting between a receive opportunity and a transmit request.
-	for r.err == nil {
-		select {
-		// interrupt
-		case <-intrChan:
-			r.intrCnt++
-			// What this interrupt is about depends on the current mode.
-			switch r.mode {
-			case MODE_RECEIVE:
-				r.intrReceive()
-			case MODE_TRANSMIT:
-				r.intrTransmit()
-			default:
-				r.log("Spurious interrupt in mode=%x", r.mode)
+		// If we're in RX mode and the chip shows a timeout, then reset it.
+		// This shouldn't happen but is here as a safety catch.
+		if r.mode == MODE_RECEIVE && r.readReg(REG_IRQFLAGS1)&IRQ1_TIMEOUT != 0 {
+			r.log("Rx restart")
+			r.log("Mode: %#x, mapping: %#x, IRQ flags: %#x %#x",
+				r.readReg(REG_OPMODE), r.readReg(REG_DIOMAPPING1),
+				r.readReg(REG_IRQFLAGS1), r.readReg(REG_IRQFLAGS2))
+			r.setMode(MODE_FS)
+			r.setMode(MODE_RECEIVE)
+		}
+		// Adjust RSSI threshold
+		if dt := time.Since(r.rssiAdj); dt > 10*time.Second {
+			timeoutPerSec := float64(r.rxTimeout) / dt.Seconds()
+			switch {
+			case timeoutPerSec > 10:
+				r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)-1)
+				r.log("RSSI threshold raised: %.2f timeout/sec, %.1fdBm",
+					timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
+			case timeoutPerSec < 5:
+				r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)+1)
+				r.log("RSSI threshold lowered: %.2f timeout/sec, %.1fdBm",
+					timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
 			}
-
-		// Something to transmit.
-		case payload := <-r.txChan:
-			if r.receiving() {
-				// If we're receiving we switch over and complete that task.
-				r.intrReceive()
-			}
-			if r.err == nil {
-				r.send(payload)
-			}
+			r.rxTimeout = 0
+			r.rssiAdj = time.Now()
 		}
 	}
-	r.log("rx goroutine exiting, %s", r.err)
-	// Signal to clients that something is amiss.
-	close(r.rxChan)
-	close(intrStop)
-	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
-	//r.spi.Close()
 }
 
-// send switches the radio's mode and starts transmitting a packet.
-func (r *Radio) send(payload []byte) {
+// Transmit switches the radio's mode and starts transmitting a packet.
+func (r *Radio) Transmit(payload []byte) error {
+	r.Lock()
+	defer r.Unlock()
+
+	if r.busy() {
+		return busyError{"radio is busy"}
+	}
 	// limit the payload to valid lengths
 	switch {
 	case len(payload) > 65:
 		payload = payload[:65]
 	case len(payload) == 0:
-		return
+		return errors.New("invalid payload length")
 	}
 	r.setMode(MODE_FS)
 	//r.writeReg(0x2D, 0x01) // set preamble to 1 (too short)
@@ -579,22 +557,25 @@ func (r *Radio) send(payload []byte) {
 	buf[0] = byte(len(payload))
 	copy(buf[1:], payload)
 	r.writeReg(REG_FIFO|0x80, buf...)
+	debugPin.Out(gpio.High)
 	r.setMode(MODE_TRANSMIT)
+	return nil
 }
 
-// intrTransmit handles an interrupt after transmitting.
-func (r *Radio) intrTransmit() {
+// txDone handles an interrupt after transmitting.
+func (r *Radio) txDone() {
 	// Double-check that the packet got transmitted.
 	if irq2 := r.readReg(REG_IRQFLAGS2); irq2&IRQ2_PACKETSENT == 0 {
-		r.log("sx12331: TX done interrupt, but packet not transmitted? %#x", irq2)
+		r.log("TX done interrupt, but packet not transmitted? %#x", irq2)
 	}
+	//r.log("TX done")
 	// Now receive.
 	r.setMode(MODE_RECEIVE)
 }
 
-// intrReceive handles a receive interrupt. See the notes in the README about the various
+// rx handles a receive interrupt. See the notes in the README about the various
 // possible strategies.
-func (r *Radio) intrReceive() {
+func (r *Radio) rx() (*RxPacket, error) {
 	// Get timestamp and calculate timeout. At 50kbps a 2-byte ACK takes 2ms and a full 66 byte
 	// packet takes 12.3ms.
 	t0 := time.Now()
@@ -605,9 +586,7 @@ func (r *Radio) intrReceive() {
 	readFifo := func() []byte {
 		var wBuf, rBuf [67]byte
 		wBuf[0] = REG_FIFO
-		r.Lock()
 		r.spi.Tx(wBuf[:], rBuf[:])
-		r.Unlock()
 		return rBuf[1:]
 	}
 
@@ -621,19 +600,20 @@ func (r *Radio) intrReceive() {
 			if irq2&IRQ2_CRCOK == 0 {
 				r.log("Rx bad CRC")
 				readFifo()
-				return
+				return nil, nil
 			}
 			if rssi == 0 {
 				r.log("Rx interrupt: packet was ready")
 			}
 			break
 		}
-		// Bail out if we're not actually receiving a packet. This could happen if the
-		// receiver restarts.
+		// Bail out if we're not actually receiving a packet. This happens when the
+		// receiver restarts because RSSI went away or no SYNC was found before timeout.
 		irq1 := r.readReg(REG_IRQFLAGS1)
 		if irq1&(IRQ1_RXREADY|IRQ1_RSSI) != IRQ1_RXREADY|IRQ1_RSSI {
-			r.log("... not receiving? irq1=%#02x irq2=%02x", irq1, irq2)
-			return
+			//r.log("... not receiving? IRQ=%t mode=%#02x irq1=%#02x irq2=%02x",
+			//	r.intrPin.Read(), r.readReg(REG_OPMODE), irq1, irq2)
+			return nil, nil
 		}
 		// As soon as we have sync match, grab RSSI and FEI.
 		if rssi == 0 && irq1&IRQ1_SYNCMATCH != 0 {
@@ -659,26 +639,28 @@ func (r *Radio) intrReceive() {
 			}
 			// Restart Rx.
 			r.writeReg(REG_PKTCONFIG2, 0x16)
-			return
+			return nil, nil
 		}
 		time.Sleep(time.Millisecond)
 	}
 
 	// Got packet, read it.
+	debugPin.Out(gpio.Low)
 	buf := readFifo()
 
 	// Push packet into channel.
 	l := buf[0]
 	if l > 65 {
 		r.log("Rx packet too long (%d)", l)
-		return
+		return nil, fmt.Errorf("received packet too long (%d)", l)
 	}
-	pkt := RxPacket{Payload: buf[1 : 1+l], Rssi: rssi, Fei: fei}
-	select {
-	case r.rxChan <- &pkt:
-	default:
-		r.log("rxChan full")
+	var snr int
+	if rssi != 0 {
+		floor := -int(r.readReg(REG_RSSITHRES)) / 2
+		snr = rssi - floor
+		r.log("RX Rssi=%d Floor=%d SNR=%d", rssi, floor, snr)
 	}
+	return &RxPacket{Payload: buf[1 : 1+l], Rssi: rssi, Snr: snr, Fei: fei}, nil
 }
 
 // logRegs is a debug helper function to print almost all the sx1231's registers.
@@ -700,8 +682,6 @@ func (r *Radio) logRegs() {
 // writeReg writes one or multiple registers starting at addr, the sx1231 auto-increments (except
 // for the FIFO register where that wouldn't be desirable).
 func (r *Radio) writeReg(addr byte, data ...byte) {
-	r.Lock()
-	defer r.Unlock()
 	wBuf := make([]byte, len(data)+1)
 	rBuf := make([]byte, len(data)+1)
 	wBuf[0] = addr | 0x80
@@ -711,8 +691,6 @@ func (r *Radio) writeReg(addr byte, data ...byte) {
 
 // readReg reads one register and returns its value.
 func (r *Radio) readReg(addr byte) byte {
-	r.Lock()
-	defer r.Unlock()
 	var buf [2]byte
 	r.spi.Tx([]byte{addr & 0x7f, 0}, buf[:])
 	return buf[1]
@@ -720,8 +698,6 @@ func (r *Radio) readReg(addr byte) byte {
 
 // readReg16 reads one 16-bit register and returns its value.
 func (r *Radio) readReg16(addr byte) uint16 {
-	r.Lock()
-	defer r.Unlock()
 	var buf [3]byte
 	r.spi.Tx([]byte{addr & 0x7f, 0, 0}, buf[:])
 	return (uint16(buf[1]) << 8) | uint16(buf[2])

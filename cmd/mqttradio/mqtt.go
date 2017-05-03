@@ -38,21 +38,23 @@ type mq struct {
 // get published to the broker, so the local routing is in addition, not in replacement.)
 type subHook struct {
 	topic  string        // topic that is being matched (exact match for now)
-	ch     reflect.Value // channel for the subscription
-	chElem reflect.Type  // type of the channel element
+	evFunc reflect.Value // event function for the subscription
+	evType reflect.Type  // type of the event
 }
 
 // newMQ connects to a broker and returns a new mq object. The connection is persistent, i.e.,
 // re-establishes itself if there is a disconnect. Subscriptions also get renewed after a reconnect.
 func newMQ(conf MqttConfig, debug LogPrintf) (*mq, error) {
+	hostname, _ := os.Hostname()
+	id := "mqttradio-" + hostname
 	if debug != nil {
-		debug("Configuring MQTT: %+v", conf)
+		debug("Configuring MQTT with client id %s: %+v", id, conf)
 	}
 	//mqtt.DEBUG = log.New(os.Stderr, "", 0)
 	mqtt.ERROR = log.New(os.Stderr, "", 0)
 	opts := mqtt.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", conf.Host, conf.Port))
-	opts.ClientID = "mqttradio"
+	opts.ClientID = id
 	opts.Username = conf.User
 	opts.Password = conf.Password
 
@@ -95,10 +97,11 @@ func (mq *mq) Publish(topic string, payload interface{}) {
 	for _, hook := range mq.subHooks {
 		if topic == hook.topic {
 			//log.Printf("PUB hook: %s", topic)
-			chanMsg := reflect.Indirect(reflect.New(hook.chElem))
-			chanMsg.FieldByName("Topic").SetString(topic)
-			chanMsg.FieldByName("Payload").Set(payVal)
-			hook.ch.Send(chanMsg)
+			evPtr := reflect.New(hook.evType)
+			evStruct := reflect.Indirect(evPtr)
+			evStruct.FieldByName("Topic").SetString(topic)
+			evStruct.FieldByName("Payload").Set(payVal)
+			hook.evFunc.Call([]reflect.Value{evPtr})
 		}
 	}
 	runtime.Gosched() // yield the CPU so any hooks can run
@@ -115,20 +118,27 @@ func (mq *mq) Publish(topic string, payload interface{}) {
 }
 
 // Subscribe subscribes to an MQTT topic and ensures that internal forwarding occurs as well.
-func (mq *mq) Subscribe(topic string, subChan interface{}) error {
+func (mq *mq) Subscribe(topic string, eventFunc interface{}) error {
 	// A few sanity checks.
-	chanType := reflect.TypeOf(subChan)
-	if chanType.Kind() != reflect.Chan {
-		panic("subChan must be a channel")
+	eventFuncType := reflect.TypeOf(eventFunc)
+	if eventFuncType.Kind() != reflect.Func {
+		panic("eventFunc must be a function")
 	}
-	chanElemType := chanType.Elem()
-	if chanElemType.Kind() != reflect.Struct {
-		panic("subChan element must be struct")
+	if eventFuncType.NumIn() != 1 || eventFuncType.NumOut() != 0 {
+		panic("eventFunc must take one parameter and not return any")
 	}
-	chanValue := reflect.ValueOf(subChan)
+	eventPtrType := eventFuncType.In(0)
+	if eventPtrType.Kind() != reflect.Ptr {
+		panic("eventFunc must take a pointer parameter")
+	}
+	eventType := eventPtrType.Elem()
+	if eventType.Kind() != reflect.Struct {
+		panic("eventFunc must take a pointer to a struct as parameter")
+	}
+	eventFuncValue := reflect.ValueOf(eventFunc)
 
 	// Internal subscription hook.
-	mq.subHooks = append(mq.subHooks, subHook{topic, chanValue, chanElemType})
+	mq.subHooks = append(mq.subHooks, subHook{topic, eventFuncValue, eventType})
 
 	// MQTT subscription handler.
 	handler := func(c mqtt.Client, m mqtt.Message) {
@@ -144,14 +154,14 @@ func (mq *mq) Subscribe(topic string, subChan interface{}) error {
 			return
 		}
 
-		msg := reflect.New(chanElemType)
+		msg := reflect.New(eventType)
 		// This is a hack: instead of dealing with reflection ourselves we make
 		// json.Unmarshal do the work.
 		jsonMsg := fmt.Sprintf(`{"Topic":%q, "Payload":%s}`, m.Topic(), payload)
 		if err := json.Unmarshal([]byte(jsonMsg), msg.Interface()); err != nil {
 			log.Printf("cannot json decode payload for %s: %s", m.Topic(), err)
 		} else {
-			chanValue.Send(reflect.Indirect(msg))
+			eventFuncValue.Call([]reflect.Value{msg})
 		}
 	}
 

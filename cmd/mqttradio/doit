@@ -1,2 +1,2 @@
 #! /usr/bin/fish
-env GOARCH=arm go build .; and rsync mqttradio chip6:; and ssh chip6 ./mqttradio.sh
+env GOARCH=arm go build .; and rsync mqttradio chip6:; and ssh chip6 sudo ./mqttradio
