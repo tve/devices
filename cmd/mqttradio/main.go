@@ -22,6 +22,9 @@ import (
 
 type LogPrintf func(format string, v ...interface{})
 
+//===== Config file structure
+
+// Config is the top level of the config file and holds all sections.
 type Config struct {
 	Debug  bool
 	Help   bool
@@ -30,6 +33,7 @@ type Config struct {
 	Module []ModuleConfig
 }
 
+// MqttConfig holds the info from the MQTT configuration section.
 type MqttConfig struct {
 	Host     string
 	Port     int
@@ -37,46 +41,39 @@ type MqttConfig struct {
 	Password string
 }
 
+// RadioConfig holds the info from one radio config section. Multiple sections
+// may be used to configure multiple radios.
 type RadioConfig struct {
-	Type       string
-	Prefix     string
-	SpiBus     int    `toml:"spi_bus"`
-	SpiCS      int    `toml:"spi_cs"`
-	CSMuxPin   string `toml:"cs_mux_pin"`
-	CSMuxValue int    `toml:"cs_mux_value"`
-	IntrPin    string `toml:"intr_pin"`
-	Freq       int
-	Sync       string
-	Rate       string
-	Power      int
+	Type       string // fsk or lora
+	Prefix     string // mqtt topic prefix, /rx and /tx added
+	SpiBus     int    `toml:"spi_bus"`      // SPI bus number
+	SpiCS      int    `toml:"spi_cs"`       // SPI chip select number
+	CSMuxPin   string `toml:"cs_mux_pin"`   // special extra chip select
+	CSMuxValue int    `toml:"cs_mux_value"` // value of chip select mux
+	IntrPin    string `toml:"intr_pin"`     // name of interrupt GPIO pin
+	Freq       int    // radio frequency to operate at, in Mhz, Khz, or Hz
+	Sync       string // sync bytes
+	Rate       string // data rate name, from radio driver
+	Power      int    // TX power level, in dBm
 }
 
+// ModuleConfig holds the info from one protocol module section. Multiple sections
+// may be used to instatiate multiple protcol modules.
 type ModuleConfig struct {
-	Name   string
-	Sub    string
-	Pub    string
-	Offset int
-	Value  int
-	Mask   int
+	Name string // name of module (identifies the code for it)
+	Sub  string // mqtt topic to subscribe to
+	Pub  string // mqtt topic to publish to
+	//Offset int //
+	//Value  int
+	//Mask   int
 }
 
-// muxedSPI opens an SPI bus and uses an extra pin to mux it across two radios.
-func muxedSPI(selPinName string) ([]spi.Conn, error) {
-	selPin := gpio.ByName(selPinName)
-	if selPin == nil {
-		return nil, fmt.Errorf("cannot open pin %s", selPinName)
-	}
+//===== Main code
 
-	spiBus, err := spi.New(-1, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	radio0, radio1 := spimux.New(spiBus, selPin)
-	return []spi.Conn{radio0, radio1}, nil
-}
-
+// main reads the config, connects to the MQTT broker, then sets-up the radios, sets-up
+// the protocol modules, and finally lets the traffic flow.
 func main() {
+	// Command-line flags.
 	help := flag.Bool("help", false, "print usage help")
 	configFile := flag.String("config", "mqttradio.toml", "path to config file")
 	flag.Parse()
@@ -105,6 +102,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Process the config file.
 	config := &Config{}
 	rawConfig, err := ioutil.ReadFile(*configFile)
 	if err != nil {
@@ -128,12 +126,15 @@ func main() {
 		logger = log.Printf
 	}
 
+	// Connect to MQTT broker.
+	log.Printf("Connecting to MQTT broker")
 	mq, err := newMQ(config.Mqtt, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect to MQTT broker: %s", err)
 		os.Exit(2)
 	}
 
+	// Start the HW peripheral interface library.
 	log.Printf("Configuring radio(s)")
 	if _, err = host.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to init I/O: %s", err)
@@ -166,4 +167,20 @@ func main() {
 	for {
 		time.Sleep(time.Hour)
 	} // ugh!
+}
+
+// muxedSPI opens an SPI bus and uses an extra pin to mux it across two radios.
+func muxedSPI(selPinName string) ([]spi.Conn, error) {
+	selPin := gpio.ByName(selPinName)
+	if selPin == nil {
+		return nil, fmt.Errorf("cannot open pin %s", selPinName)
+	}
+
+	spiBus, err := spi.New(-1, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	radio0, radio1 := spimux.New(spiBus, selPin)
+	return []spi.Conn{radio0, radio1}, nil
 }
