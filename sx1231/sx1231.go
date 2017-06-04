@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/gpio/gpioreg"
 	"periph.io/x/periph/conn/spi"
 )
 
@@ -150,9 +151,9 @@ var debugPin gpio.PinOut
 // Received packets will be sent on the returned rxChan, which has a small amount of
 // buffering. The rxChan will be closed if a persistent error occurs when
 // communicating with the device, use the Error() function to retrieve the error.
-func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
+func New(port spi.Port, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
-		spi: dev, intrPin: intr,
+		intrPin: intr,
 		mode:    255,
 		paBoost: opts.PABoost,
 		log:     func(format string, v ...interface{}) {},
@@ -163,13 +164,12 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 		}
 	}
 
-	// Set SPI parameters.
-	if err := dev.Speed(4 * 1000 * 1000); err != nil {
-		return nil, fmt.Errorf("sx1231: cannot set speed, %v", err)
+	// Set SPI parameters and get a connection.
+	conn, err := port.DevParams(4*1000*1000, spi.Mode0, 8)
+	if err != nil {
+		return nil, fmt.Errorf("sx1231: cannot set device params: %v", err)
 	}
-	if err := dev.Configure(spi.Mode0, 8); err != nil {
-		return nil, fmt.Errorf("sx1231: cannot set mode, %v", err)
-	}
+	r.spi = conn
 
 	// Try to synchronize communication with the sx1231.
 	sync := func(pattern byte) error {
@@ -177,7 +177,7 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 		for n := 10; n > 0; n-- {
 			// Doing write transactions explicitly to get OS errors.
 			r.writeReg(REG_SYNCVALUE1, pattern)
-			if err := dev.Tx([]byte{REG_SYNCVALUE1 | 0x80, pattern}, []byte{0, 0}); err != nil {
+			if err := conn.Tx([]byte{REG_SYNCVALUE1 | 0x80, pattern}, []byte{0, 0}); err != nil {
 				return fmt.Errorf("sx1231: %s", err)
 			}
 			// Read same thing back, we hope...
@@ -232,7 +232,7 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	copy(wBuf[2:], r.sync)
 	r.spi.Tx(wBuf, rBuf)
 
-	debugPin = gpio.ByName("CSID1")
+	debugPin = gpioreg.ByName("CSID1")
 	if debugPin == nil {
 		r.log("Cannot find debug pin")
 	}
@@ -648,7 +648,7 @@ func (r *Radio) rx() (*RxPacket, error) {
 	debugPin.Out(gpio.Low)
 	buf := readFifo()
 
-	// Push packet into channel.
+	// Construct RxPacket and return it.
 	l := buf[0]
 	if l > 65 {
 		r.log("Rx packet too long (%d)", l)

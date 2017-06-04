@@ -40,13 +40,8 @@ import (
 	"periph.io/x/periph/conn/spi"
 )
 
-const rxChanCap = 4 // queue up to 4 received packets before dropping
-const txChanCap = 4 // queue up to 4 packets to tx before blocking
-
 // Radio represents a Semtech SX127x LoRA radio.
 type Radio struct {
-	TxChan chan<- []byte    // channel to transmit packets
-	RxChan <-chan *RxPacket // channel for received packets
 	// configuration
 	spi     spi.Conn   // SPI device to access the radio
 	intrPin gpio.PinIn // interrupt pin for RX and TX interrupts
@@ -55,12 +50,10 @@ type Radio struct {
 	freq    uint32     // center frequency in Hz
 	config  string     // entry in Configs table being used
 	// state
-	sync.Mutex                // guard concurrent access to the radio
-	mode       byte           // current operation mode
-	err        error          // persistent error
-	rxChan     chan *RxPacket // channel to push recevied packets into
-	txChan     chan []byte    // channel for packets to be transmitted
-	log        LogPrintf      // function to use for logging
+	sync.Mutex           // guard concurrent access to the radio
+	mode       byte      // current operation mode
+	err        error     // persistent error
+	log        LogPrintf // function to use for logging
 }
 
 // RadioOpts contains options used when initilizing a Radio.
@@ -110,6 +103,18 @@ type RxPacket struct {
 	At      time.Time // time of recv interrupt
 }
 
+// Temporary is an interface implemented by errors that are temporary and thus worth retrying.
+type Temporary interface {
+	Temporary() bool
+}
+
+type busyError struct{ e string }
+
+func (b busyError) Error() string   { return b.e }
+func (b busyError) Temporary() bool { return true }
+
+var debugPin gpio.PinOut
+
 // New initializes an sx1276 Radio given an spi.Conn and an interrupt pin, and places the radio
 // in receive mode.
 //
@@ -117,31 +122,30 @@ type RxPacket struct {
 // Received packets will be sent on the returned rxChan, which has a small amount of
 // buffering. The rxChan will be closed if a persistent error occurs when
 // communicating with the device, use the Error() function to retrieve the error.
-func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
+func New(port spi.Port, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r := &Radio{
-		spi: dev, intrPin: intr,
-		mode: 255,
-		err:  fmt.Errorf("sx1276 is not initialized"),
-		log:  func(format string, v ...interface{}) {},
+		intrPin: intr,
+		mode:    255,
+		err:     fmt.Errorf("sx1276 is not initialized"),
+		log:     func(format string, v ...interface{}) {},
 	}
 	if opts.Logger != nil {
 		r.log = opts.Logger
 	}
 
-	// Set SPI parameters.
-	if err := dev.Speed(4 * 1000 * 1000); err != nil {
-		return nil, fmt.Errorf("sx1276: cannot set speed, %v", err)
+	// Set SPI parameters and get a connection.
+	conn, err := port.DevParams(4*1000*1000, spi.Mode0, 8)
+	if err != nil {
+		return nil, fmt.Errorf("sx1276: cannot set device params: %v", err)
 	}
-	if err := dev.Configure(spi.Mode0, 8); err != nil {
-		return nil, fmt.Errorf("sx1276: cannot set mode, %v", err)
-	}
+	r.spi = conn
 
 	// Try to synchronize communication with the sx1276.
 	sync := func(pattern byte) error {
 		for n := 10; n > 0; n-- {
 			// Doing write transactions explicitly to get OS errors.
 			r.writeReg(REG_SYNC, pattern)
-			if err := dev.Tx([]byte{REG_SYNC | 0x80, pattern}, []byte{0, 0}); err != nil {
+			if err := conn.Tx([]byte{REG_SYNC | 0x80, pattern}, []byte{0, 0}); err != nil {
 				return fmt.Errorf("sx1276: %s", err)
 			}
 			// Read same thing back, we hope...
@@ -186,13 +190,6 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	//r.sync = opts.Sync
 	r.spi.Tx([]byte{REG_SYNC | 0x80, opts.Sync}, []byte{0, 0})
 
-	// Allocate channels for packets, give them some buffer but the reality is that
-	// packets don't come in that fast anyway...
-	r.rxChan = make(chan *RxPacket, rxChanCap)
-	r.txChan = make(chan []byte, txChanCap)
-	r.RxChan = r.rxChan
-	r.TxChan = r.txChan
-
 	// Initialize interrupt pin.
 	if err := r.intrPin.In(gpio.Float, gpio.RisingEdge); err != nil {
 		return nil, fmt.Errorf("sx1276: error initializing interrupt pin: %s", err)
@@ -205,7 +202,9 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	}
 	// Tx a packet
 	r.log("Interrupt pin is %v", r.intrPin.Read())
-	r.send([]byte{0})
+	if err := r.Transmit([]byte{0}); err != nil {
+		return nil, fmt.Errorf("sx1276: cannot perform test transmit: %s", err)
+	}
 	if !r.intrPin.WaitForEdge(time.Second) {
 		r.logRegs()
 		v := r.intrPin.Read()
@@ -225,7 +224,6 @@ func New(dev spi.Conn, intr gpio.PinIn, opts RadioOpts) (*Radio, error) {
 	r.logRegs()
 
 	// Finally turn on the receiver.
-	go r.worker()
 	r.err = nil // can get an interrupt anytime now...
 	r.setMode(MODE_RX_CONT)
 
@@ -367,77 +365,53 @@ func (r *Radio) receiving() bool {
 
 // worker is an endless loop that processes interrupts for reception as well as packets
 // enqueued for transmit.
-func (r *Radio) worker() {
-	// Interrupt goroutine converting WaitForEdge to a channel.
-	intrChan := make(chan time.Time)
-	intrStop := make(chan struct{})
-	go func() {
-		// Make sure we're not missing an initial edge due to a race condition.
-		if r.intrPin.Read() == gpio.High {
-			intrChan <- time.Now()
-		}
-		for {
-			if r.intrPin.WaitForEdge(time.Second) {
-				// CHIP does BothEdges on the XIO pins, so we get extra intrs
-				if r.intrPin.Read() == gpio.High {
-					//r.log("interrupt")
-					intrChan <- time.Now()
-				} else {
-					//r.log("end-of-interrupt")
-				}
-			} else if r.intrPin.Read() == gpio.High {
-				r.log("Interrupt was missed!")
-				intrChan <- time.Now()
-			} else {
-				//r.log("Mode: %#x, IRQ flags: %#x, modem: %#x",
-				//	r.readReg(REG_OPMODE), r.readReg(REG_IRQFLAGS),
-				//	r.readReg(REG_MODEMSTAT))
-				select {
-				case <-intrStop:
-					r.log("sx1276: rx interrupt goroutine exiting")
-					return
-				default:
-				}
-			}
-		}
-	}()
+func (r *Radio) Receive() (*RxPacket, error) {
+	r.Lock()
+	defer r.Unlock()
 
-	for r.err == nil {
-		select {
-		// interrupt
-		case at := <-intrChan:
-			r.intrCnt++
-			// What this interrupt is about depends on the current mode.
-			switch r.mode {
-			case MODE_RX_CONT:
-				r.intrReceive(at)
-			case MODE_TX:
+	// Loop over interrupts & timeouts.
+	// Make sure we're not missing an initial edge due to a race condition.
+	intr := r.intrPin.Read() == gpio.High
+	for {
+		if !intr {
+			r.Unlock()
+			intr = r.intrPin.WaitForEdge(1 * time.Second)
+			r.Lock()
+		}
+
+		if !intr && r.intrPin.Read() == gpio.High {
+			// Sometimes WaitForEdge times out yet the interrupt pin is
+			// active, this means the driver or epoll failed us.
+			// Need to understand this better.
+			r.log("Interrupt was missed!")
+		}
+		intr = false
+
+		if r.intrPin.Read() == gpio.High {
+			switch {
+			case r.mode == MODE_RX_CONT:
+				pkt, err := r.rx(time.Now())
+				if pkt != nil || err != nil {
+					return pkt, err
+				}
+			case r.mode == MODE_TX:
 				r.setMode(MODE_RX_CONT)
 			default:
 				r.log("Spurious interrupt in mode=%x", r.mode)
 			}
 			r.writeReg(REG_IRQFLAGS, 0xff) // clear IRQ
-
-		// Something to transmit.
-		case payload := <-r.txChan:
-			if r.receiving() {
-				r.intrReceive(time.Now()) // TODO: doesn't work, need to busy-wait
-			}
-			if r.err == nil {
-				r.send(payload)
-			}
 		}
 	}
-	r.log("sx1276: rx goroutine exiting, %s", r.err)
-	// Signal to clients that something is amiss.
-	close(r.rxChan)
-	close(intrStop)
-	r.intrPin.In(gpio.Float, gpio.NoEdge) // causes interrupt goroutine to exit
-	//r.spi.Close()
 }
 
-// send switches the radio's mode and starts transmitting a packet.
-func (r *Radio) send(payload []byte) {
+// Transmit switches the radio's mode and starts transmitting a packet.
+func (r *Radio) Transmit(payload []byte) error {
+	r.Lock()
+	defer r.Unlock()
+
+	if r.receiving() {
+		return busyError{"radio is busy"}
+	}
 	// limit the payload to valid lengths
 	if len(payload) > 250 {
 		payload = payload[:250]
@@ -450,23 +424,24 @@ func (r *Radio) send(payload []byte) {
 	r.writeReg(REG_PAYLENGTH, byte(len(payload)))
 
 	r.setMode(MODE_TX)
+	return nil
 }
 
-func (r *Radio) intrReceive(at time.Time) {
+func (r *Radio) rx(at time.Time) (*RxPacket, error) {
 	irq := r.readReg(REG_IRQFLAGS)
 	switch {
 	case irq&IRQ_CRCERR != 0:
 		r.log("RX CRC error (%#x)", irq)
-		return
+		return nil, nil
 	case irq&IRQ_RXDONE == 0: // spurious interrupt?
 		r.log("RX interrupt but no packet received (%#x)", irq)
-		return
+		return nil, nil
 	case irq != 0x40:
 		r.log("RX OK??? (%#x)", irq)
 	}
 	if (r.readReg(REG_HOPCHAN) & 0x40) == 0 {
 		r.log("RX packet without CRC")
-		return
+		return nil, nil
 	}
 
 	// Grab the payload
@@ -492,13 +467,9 @@ func (r *Radio) intrReceive(at time.Time) {
 	fei := int(f2 * int64(r.bandwidth()) / 953674) // 953674=32Mhz*500/2^24
 	lna := int(r.readReg(REG_LNA) >> 5)
 
-	// Push packet into channel.
+	// Construct RxPacket and return it.
 	pkt := RxPacket{Payload: rBuf[1 : len+1], Snr: snr, Rssi: rssi, Fei: fei, Lna: lna, At: at}
-	select {
-	case r.rxChan <- &pkt:
-	default:
-		r.log("rxChan full")
-	}
+	return &pkt, nil
 }
 
 // logRegs is a debug helper function to print almost all the sx1276's registers.

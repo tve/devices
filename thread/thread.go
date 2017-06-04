@@ -15,8 +15,11 @@ func Realtime() error {
 	// Get the ID of the thread.
 	tid := syscall.Gettid()
 	// Give this thread realtime priority.
-	_, _, err := syscall.RawSyscall(syscall.SYS_SCHED_SETSCHEDULER, uintptr(tid),
+	res, _, err := syscall.RawSyscall(syscall.SYS_SCHED_SETSCHEDULER, uintptr(tid),
 		uintptr(RR), uintptr(unsafe.Pointer(&schedParam{10})))
+	if res == 0 {
+		return nil
+	}
 	return err
 }
 

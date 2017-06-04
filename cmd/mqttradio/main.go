@@ -15,8 +15,9 @@ import (
 	"github.com/tve/devices/spimux"
 	"github.com/tve/devices/sx1231"
 	"github.com/tve/devices/sx1276"
-	"periph.io/x/periph/conn/gpio"
+	"periph.io/x/periph/conn/gpio/gpioreg"
 	"periph.io/x/periph/conn/spi"
+	"periph.io/x/periph/conn/spi/spireg"
 	"periph.io/x/periph/host"
 )
 
@@ -130,14 +131,14 @@ func main() {
 	log.Printf("Connecting to MQTT broker")
 	mq, err := newMQ(config.Mqtt, logger)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to connect to MQTT broker: %s", err)
+		fmt.Fprintf(os.Stderr, "Failed to connect to MQTT broker: %s\n", err)
 		os.Exit(2)
 	}
 
 	// Start the HW peripheral interface library.
 	log.Printf("Configuring radio(s)")
 	if _, err = host.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to init I/O: %s", err)
+		fmt.Fprintf(os.Stderr, "Failed to init I/O: %s\n", err)
 		os.Exit(2)
 	}
 
@@ -146,10 +147,10 @@ func main() {
 	// We keep a map of unused muxed SPI devices. Basically when the first radio uses a
 	// muxed SPI chip select the remainder is entered here so the other radio gets it from
 	// here.
-	muxes := map[string]spi.Conn{}
+	muxes := map[string]spi.PortCloser{}
 	for _, r := range config.Radio {
 		if err := startRadio(r, muxes, mq, logger); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to config radio for %s: %s", r.Prefix, err)
+			fmt.Fprintf(os.Stderr, "Failed to config radio for %s: %s\n", r.Prefix, err)
 			os.Exit(1)
 		}
 	}
@@ -157,7 +158,7 @@ func main() {
 	log.Printf("Configuring modules")
 	for _, m := range config.Module {
 		if err := hookModule(m, mq, logger); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to install module %s (%s->%s): %s",
+			fmt.Fprintf(os.Stderr, "Failed to install module %s (%s->%s): %s\n",
 				m.Name, m.Sub, m.Pub, err)
 			os.Exit(1)
 		}
@@ -170,17 +171,17 @@ func main() {
 }
 
 // muxedSPI opens an SPI bus and uses an extra pin to mux it across two radios.
-func muxedSPI(selPinName string) ([]spi.Conn, error) {
-	selPin := gpio.ByName(selPinName)
+func muxedSPI(selPinName string) ([]spi.PortCloser, error) {
+	selPin := gpioreg.ByName(selPinName)
 	if selPin == nil {
 		return nil, fmt.Errorf("cannot open pin %s", selPinName)
 	}
 
-	spiBus, err := spi.New(-1, 0)
+	spiPort, err := spireg.Open("")
 	if err != nil {
 		return nil, err
 	}
 
-	radio0, radio1 := spimux.New(spiBus, selPin)
-	return []spi.Conn{radio0, radio1}, nil
+	radio0, radio1 := spimux.New(spiPort, selPin)
+	return []spi.PortCloser{radio0, radio1}, nil
 }

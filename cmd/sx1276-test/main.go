@@ -10,8 +10,8 @@ import (
 
 	"github.com/tve/devices/spimux"
 	"github.com/tve/devices/sx1276"
-	"periph.io/x/periph/conn/gpio"
-	"periph.io/x/periph/conn/spi"
+	"periph.io/x/periph/conn/gpio/gpioreg"
+	"periph.io/x/periph/conn/spi/spireg"
 	"periph.io/x/periph/host"
 )
 
@@ -26,21 +26,21 @@ func main() {
 	panicIf(err)
 
 	intrPinName := "EINT17"
-	intrPin := gpio.ByName(intrPinName)
+	intrPin := gpioreg.ByName(intrPinName)
 	if intrPin == nil {
 		panic("Cannot open pin " + intrPinName)
 	}
 
 	selPinName := ""
-	selPin := gpio.ByName("CSID0")
+	selPin := gpioreg.ByName("CSID0")
 	if selPin == nil {
 		panic("Cannot open pin " + selPinName)
 	}
 
-	spiBus, err := spi.New(-1, 0)
+	spiPort, err := spireg.Open("")
 	panicIf(err)
 
-	_, spi1276 := spimux.New(spiBus, selPin)
+	_, spi1276 := spimux.New(spiPort, selPin)
 
 	log.Printf("Initializing LoRA radio...")
 	t0 := time.Now()

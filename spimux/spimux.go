@@ -3,8 +3,10 @@
 package spimux
 
 import (
+	"errors"
 	"sync"
 
+	"periph.io/x/periph/conn"
 	"periph.io/x/periph/conn/gpio"
 	"periph.io/x/periph/conn/spi"
 )
@@ -26,17 +28,35 @@ import (
 // (SPI mode and number of bits) is shared between the two devices, i.e., it is not possible
 // to use different settings.
 type Conn struct {
-	mu       *sync.Mutex // prevent concurrent access to shared SPI bus
-	spi.Conn             // the underlying SPI bus with shared chip select
-	selPin   gpio.PinIO  // pin to select between two devices
-	sel      gpio.Level  // select value for this device
+	mu     *sync.Mutex // prevent concurrent access to shared SPI bus
+	conn   *spi.Conn   // the underlying SPI bus with shared chip select
+	port   spi.Port
+	selPin gpio.PinIO // pin to select between two devices
+	sel    gpio.Level // select value for this device
 }
 
 // New returns two connections for the provided SPI Conn, the first one using Low for the
 // select pin, and the second using High.
-func New(spi spi.Conn, selPin gpio.PinIO) (*Conn, *Conn) {
-	mu := sync.Mutex{}
-	return &Conn{&mu, spi, selPin, gpio.Low}, &Conn{&mu, spi, selPin, gpio.High}
+func New(port spi.PortCloser, selPin gpio.PinIO) (*Conn, *Conn) {
+	mu := sync.Mutex{} // shared mutex
+	var conn spi.Conn  // shared spi.Conn
+	return &Conn{&mu, &conn, port, selPin, gpio.Low}, &Conn{&mu, &conn, port, selPin, gpio.High}
+}
+
+// DevParams sets the device parameters and returns itself ('cause it's a Port as well as a Conn).
+func (c *Conn) DevParams(maxHz int64, mode spi.Mode, bits int) (spi.Conn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if *c.conn == nil {
+		conn, err := c.port.DevParams(maxHz, mode, bits)
+		if err != nil {
+			return nil, err
+		}
+		*c.conn = conn
+	}
+
+	return c, nil
 }
 
 // Tx sets the select pin to the correct value and calls the underlying Tx.
@@ -45,16 +65,28 @@ func (c *Conn) Tx(w, r []byte) error {
 	defer c.mu.Unlock()
 
 	c.selPin.Out(c.sel)
-	return c.Conn.Tx(w, r)
+	return (*c.conn).Tx(w, r)
 }
 
-// Write sets the select pin to the correct value and calls the underlying Write.
+/* Write sets the select pin to the correct value and calls the underlying Write.
 func (c *Conn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.Conn.Write(b)
-}
+	return (*c.conn).Write(b)
+} */
 
 // Close is a no-op. TODO: close once both spimux are closed.
 func (c *Conn) Close() error { return nil }
+
+// Duplex implements the spi.Conn interface.
+func (c *Conn) Duplex() conn.Duplex { return conn.Full }
+
+// TxPackets is not implemented.
+func (c *Conn) TxPackets(p []spi.Packet) error { return errors.New("TxPackets is not implemented") }
+
+// LimitSpeed is not implemented.
+func (c *Conn) LimitSpeed(maxHz int64) error { return errors.New("limitSpeed is not implemented") }
+
+var _ spi.Conn = &Conn{}
+var _ spi.PortCloser = &Conn{}
