@@ -13,14 +13,21 @@ func JeeLabsSync(grp byte) []byte {
 //
 // Jeelabs native rfm69 packet format
 //
-// Preamble: 5 bytes, sync bytes: 2, packet data: 1 byte destination, 1 byte source, 0..62
-// bytes data, std CRC. The first sync byte is 0x2d, the second is the group ID (network number).
+// From the radio's perspective, a packet has 5 preamble bytes, 2 sync bytes, a length byte, a
+// dest address byte, up to 64 payload bytes, and 2-byte CRC. The length counts the payload plus the dest
+// address.
 //
-// The first payload data byte contains the 6-bit destination node ID and two sync parity bits
+// The JeeLabs format defines the 5-byte preamble (the radio allows many options) and the 2 sync
+// bytes. The first sync byte is 0x2d, the second is the group ID (network number).
+// The JeeLabs format also uses the first payload byte as a source address. This means that
+// the application payload can hold up to 63 bytes. Finally, in newer JeeLabs usage the first payload
+// byte (after the src address) is a packet type format byte.
+//
+// The destination address byte is calculated as the 6-bit destination node ID and two sync parity bits
 // at the top. Bit 7 (MSB) is calculated as the group's b7^b5^b3^b1 and bit 6 as the group's
 // b6^b4^b2^b0.
 //
-// The second payload byte contains the 6-bit source node ID and two control bits. Bit 7 is an
+// The source address byte is calculated as the 6-bit source node ID and two control bits. Bit 7 is an
 // ACK request bit and bit 6 is unassigned.
 //
 // A packet with destination ID 0 is a broadcast packet, a node ID of 62 is used for
