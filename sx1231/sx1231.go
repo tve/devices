@@ -472,9 +472,10 @@ func (r *Radio) Receive() (*RxPacket, error) {
 	defer r.Unlock()
 
 	// Loop over interrupts & timeouts.
-	// Make sure we're not missing an initial edge due to a race condition.
-	intr := r.intrPin.Read() == gpio.High
 	for {
+		// Make sure we're not missing an initial edge due to a race condition.
+		intr := r.intrPin.Read() == gpio.High
+
 		if !intr {
 			r.Unlock()
 			intr = r.intrPin.WaitForEdge(1 * time.Second)
@@ -486,6 +487,9 @@ func (r *Radio) Receive() (*RxPacket, error) {
 			// active, this means the driver or epoll failed us.
 			// Need to understand this better.
 			r.log("Interrupt was missed!")
+			// If we don't get interrupts it messes with the rx threshold adjustemnt.
+			r.rxTimeout = 0
+			r.rssiAdj = time.Now()
 		}
 		intr = false
 
@@ -505,14 +509,16 @@ func (r *Radio) Receive() (*RxPacket, error) {
 		}
 
 		// If we're in RX mode and the chip shows a timeout, then reset it.
-		// This shouldn't happen but is here as a safety catch.
-		if r.mode == MODE_RECEIVE && r.readReg(REG_IRQFLAGS1)&IRQ1_TIMEOUT != 0 {
-			r.log("Rx restart")
-			r.log("Mode: %#x, mapping: %#x, IRQ flags: %#x %#x",
-				r.readReg(REG_OPMODE), r.readReg(REG_DIOMAPPING1),
-				r.readReg(REG_IRQFLAGS1), r.readReg(REG_IRQFLAGS2))
-			r.setMode(MODE_FS)
-			r.setMode(MODE_RECEIVE)
+		// Not sure why it happens, perhaps if WaitForEdge times out and then
+		// the RX timeout happens before we get here?
+		if r.mode == MODE_RECEIVE {
+			if irq1 := r.readReg(REG_IRQFLAGS1); irq1&IRQ1_TIMEOUT != 0 {
+				//r.log("Rx restart -- mode: %#x, mapping: %#x, IRQ flags: %#x %#x",
+				//	r.readReg(REG_OPMODE), r.readReg(REG_DIOMAPPING1),
+				//	irq1, r.readReg(REG_IRQFLAGS2))
+				r.setMode(MODE_FS)
+				r.setMode(MODE_RECEIVE)
+			}
 		}
 		// Adjust RSSI threshold
 		if dt := time.Since(r.rssiAdj); dt > 10*time.Second {
@@ -524,8 +530,17 @@ func (r *Radio) Receive() (*RxPacket, error) {
 					timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
 			case timeoutPerSec < 5:
 				r.writeReg(REG_RSSITHRES, r.readReg(REG_RSSITHRES)+1)
-				r.log("RSSI threshold lowered: %.2f timeout/sec, %.1fdBm",
-					timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
+				thres := -float64(r.readReg(REG_RSSITHRES)) / 2
+				if thres < -105 {
+					// This is getting absurd, something is not working here
+					// let's reset to a more reasonable value.
+					r.writeReg(REG_RSSITHRES, 2*95)
+					r.log("RSSI threshold reset: %.2f timeout/sec, %.1fdBm",
+						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
+				} else {
+					r.log("RSSI threshold lowered: %.2f timeout/sec, %.1fdBm",
+						timeoutPerSec, -float64(r.readReg(REG_RSSITHRES))/2)
+				}
 			}
 			r.rxTimeout = 0
 			r.rssiAdj = time.Now()
